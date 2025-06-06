@@ -14,38 +14,20 @@ func routes(_ app: Application) throws {
 
     try app.register(collection: TodoController())
 
-    // MARK: - 🔐 Protected Supabase-authenticated Routes
+    // MARK: - 🔐 Authenticated Action: Delete Supabase User
 
-    let protected = app.grouped(SupabaseJWTMiddleware())
-
-    protected.get("video-access", ":id") { req -> Response in
-        let videoID = req.parameters.get("id") ?? ""
-
-        struct VideoResponse: Content {
-            let id: String
-            let signedUrl: String
-        }
-
-        let signedUrl = "https://example.com/videos/\(videoID).mp4?token=secure"
-
-        return try Response(
-            status: .ok,
-            body: .init(data: JSONEncoder().encode(VideoResponse(id: videoID, signedUrl: signedUrl)))
-        )
-    }
-
-    protected.post("delete-user") { req async throws -> Response in
+    app.post("delete-user") { req async throws -> Response in
         guard let bearer = req.headers.bearerAuthorization else {
             throw Abort(.unauthorized, reason: "Missing Bearer token")
         }
 
-        // Get user info using the access token
+        // Fetch user info using access token
         let userResponse = try await SupabaseAPI.getUser(from: bearer.token, app: app)
         guard let userId = userResponse?.id else {
-            throw Abort(.unauthorized, reason: "Could not authenticate user")
+            throw Abort(.unauthorized, reason: "Invalid or expired token")
         }
 
-        // Delete user by ID using Admin API
+        // Attempt user deletion
         let deleted = try await SupabaseAPI.deleteUser(id: userId, app: app)
         if deleted {
             return Response(status: .ok, body: .init(string: "User deleted"))
