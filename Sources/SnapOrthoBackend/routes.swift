@@ -1,8 +1,5 @@
 import Vapor
 import Fluent
-import AWSS3
-import AWSClientRuntime
-import SmithyHTTPAuth
 
 
 func routes(_ app: Application) throws {
@@ -19,7 +16,7 @@ func routes(_ app: Application) throws {
     try app.register(collection: TodoController())
 
     // Register VideoController for signed URL access
-    try app.register(collection: VideoController(app: app))
+    try app.register(collection: VideoController())
 
     // MARK: - 🔐 Authenticated Action: Delete Supabase User
 

@@ -14,8 +14,10 @@ let package = Package(
         // 🐘 Fluent driver for Postgres.
         .package(url: "https://github.com/vapor/fluent-postgres-driver.git", from: "2.8.0"),
         // 🔵 Non-blocking, event-driven networking for Swift. Used for custom executors.
-        .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
-        .package(url: "https://github.com/awslabs/aws-sdk-swift-runtime", from: "1.0.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0")
+
+
+        
 
 
     ],
@@ -27,10 +29,8 @@ let package = Package(
                 .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
                 .product(name: "Vapor", package: "vapor"),
                 .product(name: "NIOCore", package: "swift-nio"),
-                .product(name: "NIOPosix", package: "swift-nio"),
-                .product(name: "AWSS3", package: "aws-sdk-swift-runtime"),
-                .product(name: "AWSClientRuntime", package: "aws-sdk-swift-runtime"),
-                .product(name: "SmithyHTTPAuth", package: "aws-sdk-swift-runtime"),
+                .product(name: "NIOPosix", package: "swift-nio")
+
 
 
             ],
