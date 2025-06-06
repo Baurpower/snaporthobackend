@@ -4,16 +4,18 @@ import AWSClientRuntime
 import SmithyHTTPAuth
 
 struct VideoController: RouteCollection {
-    // Initialize once to reuse
+    let app: Application
     let s3Client: S3Client
 
     init(app: Application) throws {
+        self.app = app                   // Initialize app here
         self.s3Client = try S3Client(region: "us-east-1")
     }
 
     func boot(routes: RoutesBuilder) throws {
         routes.get("video-access", ":id", use: signedVideoURL)
     }
+
 
     func signedVideoURL(req: Request) async throws -> Response {
         guard let videoID = req.parameters.get("id") else {
