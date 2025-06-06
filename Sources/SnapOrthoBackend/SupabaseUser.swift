@@ -1,11 +1,3 @@
-//
-//  SupabaseUser.swift
-//  SnapOrthoBackend
-//
-//  Created by Alex Baur on 6/5/25.
-//
-
-
 import Vapor
 
 struct SupabaseUser: Content {
@@ -18,7 +10,7 @@ struct SupabaseGetUserResponse: Content {
 
 enum SupabaseAPI {
     static let supabaseURL = "https://hzxdyyjjbiqwdzwhjqoz.supabase.co"
-    static let serviceRoleKey = Environment.get("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh6eGR5eWpqYmlxd2R6d2hqcW96Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDkwNTgwMjUsImV4cCI6MjA2NDYzNDAyNX0.93xTu4zhoFXbzhTHHfGiMNlo8m9akPCi2n0QFNfFtuc")!
+    static let serviceRoleKey = Environment.get("SUPABASE_SERVICE_ROLE_KEY")!
 
     static func getUser(from accessToken: String, app: Application) async throws -> SupabaseUser? {
         var headers = HTTPHeaders()
