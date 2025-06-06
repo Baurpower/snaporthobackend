@@ -1,3 +1,8 @@
+import Vapor
+import Fluent
+import AWSS3
+import AWSClientRuntime
+import SmithyHTTPAuth
 
 
 func routes(_ app: Application) throws {
