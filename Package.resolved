@@ -1,5 +1,5 @@
 {
-  "originHash" : "b5b16bb211c009a570c8316c0b2d1c78a0bb9c097100abfe82f9b58c4da35e01",
+  "originHash" : "9ba5e1812fced28079da2117edc1f3b33417d3fceb49e21fb02af2d3783daa36",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -17,33 +17,6 @@
       "state" : {
         "revision" : "e048c8ee94967e8d8a1c2ec0e1156d6f7fa34d31",
         "version" : "1.20.0"
-      }
-    },
-    {
-      "identity" : "bluecryptor",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Kitura/BlueCryptor.git",
-      "state" : {
-        "revision" : "cec97c24b111351e70e448972a7d3fe68a756d6d",
-        "version" : "2.0.2"
-      }
-    },
-    {
-      "identity" : "blueecc",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Kitura/BlueECC.git",
-      "state" : {
-        "revision" : "1485268a54f8135435a825a855e733f026fa6cc8",
-        "version" : "1.2.201"
-      }
-    },
-    {
-      "identity" : "bluersa",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Kitura/BlueRSA.git",
-      "state" : {
-        "revision" : "f40325520344a966523b214394aa350132a6af68",
-        "version" : "1.0.203"
       }
     },
     {
@@ -80,24 +53,6 @@
       "state" : {
         "revision" : "095bc5a17ab3363167f4becb270b6f8eb790481c",
         "version" : "2.10.1"
-      }
-    },
-    {
-      "identity" : "kituracontracts",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Kitura/KituraContracts.git",
-      "state" : {
-        "revision" : "6edf7ac3dd2b3a2c61284778d430bbad7d8a6f23",
-        "version" : "2.0.1"
-      }
-    },
-    {
-      "identity" : "loggerapi",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Kitura/LoggerAPI.git",
-      "state" : {
-        "revision" : "4e6b45e850ffa275e8e26a24c6454fd709d5b6ac",
-        "version" : "2.0.0"
       }
     },
     {
@@ -233,15 +188,6 @@
       "state" : {
         "revision" : "a0a57e949a8903563aba4615869310c0ebf14c03",
         "version" : "1.4.0"
-      }
-    },
-    {
-      "identity" : "swift-jwt",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Kitura/Swift-JWT.git",
-      "state" : {
-        "revision" : "2cf7ef3eeb0df84318c75662c257651285f8289f",
-        "version" : "4.0.2"
       }
     },
     {
