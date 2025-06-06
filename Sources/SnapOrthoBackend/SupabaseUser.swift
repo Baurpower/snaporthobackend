@@ -4,10 +4,6 @@ struct SupabaseUser: Content {
     let id: String
 }
 
-struct SupabaseGetUserResponse: Content {
-    let user: SupabaseUser
-}
-
 enum SupabaseAPI {
     static let supabaseURL = "https://hzxdyyjjbiqwdzwhjqoz.supabase.co"
     static let serviceRoleKey = Environment.get("SUPABASE_SERVICE_ROLE_KEY")!
@@ -29,11 +25,10 @@ enum SupabaseAPI {
             app.logger.warning("Failed to read response body from /auth/v1/user")
         }
 
-
         if res.status == .ok {
-            let decoded = try res.content.decode(SupabaseGetUserResponse.self)
-            app.logger.info("Decoded user id: \(decoded.user.id)")
-            return decoded.user
+            let decoded = try res.content.decode(SupabaseUser.self)
+            app.logger.info("Decoded user id: \(decoded.id)")
+            return decoded
         } else {
             app.logger.warning("Failed to verify user: \(res.status)")
             return nil
@@ -45,8 +40,17 @@ enum SupabaseAPI {
         headers.add(name: .authorization, value: "Bearer \(serviceRoleKey)")
         headers.add(name: .contentType, value: "application/json")
 
+        app.logger.info("Deleting user with id: \(id)")
+
         let res = try await app.client.delete("\(supabaseURL)/auth/v1/admin/users/\(id)", headers: headers)
         app.logger.info("Supabase delete user response status: \(res.status)")
+
+        if let bodyBuffer = res.body {
+            let data = bodyBuffer.getData(at: 0, length: bodyBuffer.readableBytes) ?? Data()
+            let bodyString = String(data: data, encoding: .utf8) ?? "empty"
+            app.logger.info("Supabase delete user response body: \(bodyString)")
+        }
+
         return res.status == .noContent || res.status == .ok
     }
 }
