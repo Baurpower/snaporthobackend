@@ -23,16 +23,17 @@ func routes(_ app: Application) throws {
         guard
             let tokenHash = try? req.query.get(String.self, at: "token_hash"),
             let type = try? req.query.get(String.self, at: "type"),
-            let next = try? req.query.get(String.self, at: "next") ?? "/"
+            let next = try? req.query.get(String.self, at: "next") ?? "/",
+            let supabaseServiceRoleKey = Environment.get("SUPABASE_SERVICE_ROLE_KEY")
         else {
             let errorRedirect = URI(string: "/auth/auth-code-error")
             return req.eventLoop.makeSucceededFuture(req.redirect(to: errorRedirect.string))
         }
 
         // REST API call to Supabase verifyOtp
-        let verifyUrl = URI(string: "https://YOUR_SUPABASE_URL/auth/v1/verify")
+        let verifyUrl = URI(string: "https://geznczcokbgybsseipjg.supabase.co/auth/v1/verify")
         var headers = HTTPHeaders()
-        headers.add(name: "apikey", value: "YOUR_SUPABASE_SERVICE_ROLE_KEY")
+        headers.add(name: "apikey", value: supabaseServiceRoleKey)
         headers.add(name: "Content-Type", value: "application/json")
 
         let payload = VerifyOtpPayload(token_hash: tokenHash, type: type)
@@ -50,6 +51,7 @@ func routes(_ app: Application) throws {
             }
         }
     }
+
 
     // MARK: - Payload Struct
     struct VerifyOtpPayload: Content {
