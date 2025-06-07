@@ -2,6 +2,7 @@ import Vapor
 import Fluent
 
 
+
 func routes(_ app: Application) throws {
     // MARK: - 🔓 Public Routes
     
@@ -18,30 +19,42 @@ func routes(_ app: Application) throws {
     // Register VideoController for signed URL access
     try app.register(collection: VideoController())
     
-    // MARK: - 🔐 Authenticated Action: Delete Supabase User
-    // Define request body struct at the top of routes.swift
-    struct DeleteUserRequest: Content {
-        let userId: String
-    }
-    
-    app.post("delete-user") { req async throws -> Response in
-        guard let bearer = req.headers.bearerAuthorization else {
-            throw Abort(.unauthorized, reason: "Missing Bearer token")
+    app.get("auth", "confirm") { req -> EventLoopFuture<Response> in
+        guard
+            let tokenHash = try? req.query.get(String.self, at: "token_hash"),
+            let type = try? req.query.get(String.self, at: "type"),
+            let next = try? req.query.get(String.self, at: "next") ?? "/"
+        else {
+            let errorRedirect = URI(string: "/auth/auth-code-error")
+            return req.eventLoop.makeSucceededFuture(req.redirect(to: errorRedirect.string))
         }
-        
-        // Decode userId from request body (frontend sends it)
-        let deleteRequest = try req.content.decode(DeleteUserRequest.self)
-        
-        app.logger.info("Processing delete-user request for userId: \(deleteRequest.userId)")
-        
-        // Attempt user deletion
-        let deleted = try await SupabaseAPI.deleteUser(id: deleteRequest.userId, app: app)
-        if deleted {
-            app.logger.info("User \(deleteRequest.userId) deleted successfully")
-            return Response(status: .ok, body: .init(string: "User deleted"))
-        } else {
-            app.logger.warning("Failed to delete user \(deleteRequest.userId)")
-            throw Abort(.internalServerError, reason: "Failed to delete user")
+
+        // REST API call to Supabase verifyOtp
+        let verifyUrl = URI(string: "https://YOUR_SUPABASE_URL/auth/v1/verify")
+        var headers = HTTPHeaders()
+        headers.add(name: "apikey", value: "YOUR_SUPABASE_SERVICE_ROLE_KEY")
+        headers.add(name: "Content-Type", value: "application/json")
+
+        let payload = VerifyOtpPayload(token_hash: tokenHash, type: type)
+
+        return req.client.post(verifyUrl, headers: headers) { postReq in
+            try postReq.content.encode(payload, as: .json)
+        }.map { response in
+            if response.status == .ok {
+                // ✅ Success → redirect to next
+                return req.redirect(to: next)
+            } else {
+                // ❌ Failure → redirect to error page
+                let errorRedirect = URI(string: "/auth/auth-code-error")
+                return req.redirect(to: errorRedirect.string)
+            }
         }
     }
+
+    // MARK: - Payload Struct
+    struct VerifyOtpPayload: Content {
+        let token_hash: String
+        let type: String
+    }
+
 }
