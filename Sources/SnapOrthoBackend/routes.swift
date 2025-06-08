@@ -19,44 +19,35 @@ func routes(_ app: Application) throws {
     // Register VideoController for signed URL access
     try app.register(collection: VideoController())
     
-    app.get("auth", "confirm") { req -> EventLoopFuture<Response> in
-        guard
-            let tokenHash = try? req.query.get(String.self, at: "token_hash"),
-            let type = try? req.query.get(String.self, at: "type"),
-            let next = try? req.query.get(String.self, at: "next") ?? "/",
-            let supabaseServiceRoleKey = Environment.get("SUPABASE_SERVICE_ROLE_KEY")
-        else {
-            let errorRedirect = URI(string: "/auth/auth-code-error")
-            return req.eventLoop.makeSucceededFuture(req.redirect(to: errorRedirect.string))
+
+        // STEP 2: User clicks email link → hits /auth/confirm
+        app.get("auth", "confirm") { req -> EventLoopFuture<Response> in
+            guard let tokenHash = try? req.query.get(String.self, at: "token_hash"),
+                  let type = try? req.query.get(String.self, at: "type"),
+                  let redirectURL = try? req.query.get(String.self, at: "redirectUrl") else {
+                throw Abort(.badRequest, reason: "Missing query parameters.")
+            }
+
+            let supabase = SupabaseClient(httpClient: app.client, logger: req.logger)
+            return supabase.verifyOtp(type: type, tokenHash: tokenHash).flatMapThrowing { session in
+                // You could set cookies here if you want to store access token
+                req.logger.info("✅ Verified OTP, redirecting to \(redirectURL)")
+                return req.redirect(to: redirectURL)
+            }
         }
 
-        // REST API call to Supabase verifyOtp
-        let verifyUrl = URI(string: "https://geznczcokbgybsseipjg.supabase.co/auth/v1/verify")
-        var headers = HTTPHeaders()
-        headers.add(name: "apikey", value: supabaseServiceRoleKey)
-        headers.add(name: "Content-Type", value: "application/json")
+        // STEP 3: Frontend calls this to set the new password
+        app.post("auth", "update-password") { req -> EventLoopFuture<HTTPStatus> in
+            struct PasswordUpdateRequest: Content {
+                let newPassword: String
+            }
 
-        let payload = VerifyOtpPayload(token_hash: tokenHash, type: type)
+            let updateReq = try req.content.decode(PasswordUpdateRequest.self)
 
-        return req.client.post(verifyUrl, headers: headers) { postReq in
-            try postReq.content.encode(payload, as: .json)
-        }.map { response in
-            if response.status == .ok {
-                // ✅ Success → redirect to next
-                return req.redirect(to: next)
-            } else {
-                // ❌ Failure → redirect to error page
-                let errorRedirect = URI(string: "/auth/auth-code-error")
-                return req.redirect(to: errorRedirect.string)
+            let supabase = SupabaseClient(httpClient: app.client, logger: req.logger)
+            return supabase.updatePassword(newPassword: updateReq.newPassword).map {
+                req.logger.info("✅ Password updated successfully")
+                return .ok
             }
         }
     }
-
-
-    // MARK: - Payload Struct
-    struct VerifyOtpPayload: Content {
-        let token_hash: String
-        let type: String
-    }
-
-}
