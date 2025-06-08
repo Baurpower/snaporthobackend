@@ -50,4 +50,33 @@ func routes(_ app: Application) throws {
                 return .ok
             }
         }
+    app.post("auth", "send-reset-email") { req -> EventLoopFuture<HTTPStatus> in
+        struct ResetRequest: Content {
+            let email: String
+        }
+
+        let resetRequest = try req.content.decode(ResetRequest.self)
+
+        let supabaseURL = "https://geznczcokbgybsseipjg.supabase.co/auth/v1/recover"
+        let serviceRoleKey = Environment.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
+
+        let body = [
+            "email": resetRequest.email,
+            "redirect_to": "https://api.snap-ortho.com/auth/confirm?redirectUrl=https://myortho-solutions.com/learnpasswordreset"
+        ]
+
+        return req.client.post(URI(string: supabaseURL)) { req in
+            req.headers.bearerAuthorization = BearerAuthorization(token: serviceRoleKey)
+            try req.content.encode(body, as: .json)
+        }.map { response in
+            if response.status == .ok {
+                req.logger.info("✅ Sent reset password email for \(resetRequest.email)")
+                return .ok
+            } else {
+                req.logger.warning("❌ Failed to send reset password email: \(response.status)")
+                return .internalServerError
+            }
+        }
+    }
+
     }
