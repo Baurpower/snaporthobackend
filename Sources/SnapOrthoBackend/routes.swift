@@ -26,20 +26,30 @@ func routes(_ app: Application) throws {
     
 
         // STEP 2: User clicks email link → hits /auth/confirm
-        app.get("auth", "confirm") { req -> EventLoopFuture<Response> in
-            guard let tokenHash = try? req.query.get(String.self, at: "token_hash"),
-                  let type = try? req.query.get(String.self, at: "type"),
-                  let redirectURL = try? req.query.get(String.self, at: "redirectUrl") else {
-                throw Abort(.badRequest, reason: "Missing query parameters.")
-            }
-
-            let supabase = SupabaseClient(httpClient: app.client, logger: req.logger)
-            return supabase.verifyOtp(type: type, tokenHash: tokenHash).flatMapThrowing { session in
-                // You could set cookies here if you want to store access token
-                req.logger.info("✅ Verified OTP, redirecting to \(redirectURL)")
-                return req.redirect(to: redirectURL)
-            }
+    app.get("auth", "confirm") { req -> EventLoopFuture<Response> in
+        guard let tokenHash = try? req.query.get(String.self, at: "token_hash"),
+              let type = try? req.query.get(String.self, at: "type") else {
+            throw Abort(.badRequest, reason: "Missing query parameters.")
         }
+
+        // Accept either redirectUrl or next param
+        let redirectURL = (try? req.query.get(String.self, at: "redirectUrl")) ??
+                          (try? req.query.get(String.self, at: "next"))
+
+        guard let redirectURL = redirectURL else {
+            throw Abort(.badRequest, reason: "Missing query parameters.")
+        }
+
+        // Log what we got (helpful for debugging PKCE flow vs classic flow)
+        req.logger.info("🔑 Handling /auth/confirm → token_hash=\(tokenHash.prefix(10))..., type=\(type), redirectURL=\(redirectURL)")
+
+        let supabase = SupabaseClient(httpClient: app.client, logger: req.logger)
+        return supabase.verifyOtp(type: type, tokenHash: tokenHash).flatMapThrowing { session in
+            req.logger.info("✅ Verified OTP → redirecting to \(redirectURL)")
+            return req.redirect(to: redirectURL)
+        }
+    }
+
 
         // STEP 3: Frontend calls this to set the new password
         app.post("auth", "update-password") { req -> EventLoopFuture<HTTPStatus> in
