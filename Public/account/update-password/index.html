@@ -1,0 +1,53 @@
+<!-- Public/account/update-password/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Reset Your Password</title>
+</head>
+<body>
+  <h1>🔑 Reset Your Password</h1>
+  <form id="reset-form">
+    <input id="pwd"         type="password" placeholder="New password" required/>
+    <input id="pwd-confirm" type="password" placeholder="Confirm password" required/>
+    <button type="submit">Reset Password</button>
+  </form>
+
+  <script type="module">
+    import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js/+esm'
+
+    // initialize with your URL & anon/public key
+    const supabase = createClient(
+      'https://<your-project>.supabase.co',
+      '<your-anon-public-key>'
+    )
+
+    document
+      .getElementById('reset-form')
+      .addEventListener('submit', async e => {
+        e.preventDefault()
+        const pwd = document.getElementById('pwd').value
+        const confirm = document.getElementById('pwd-confirm').value
+
+        if (pwd !== confirm) {
+          alert('Passwords do not match!')
+          return
+        }
+
+        // this picks up the session from the recovery flow
+        const { data, error } = await supabase.auth.updateUser({
+          password: pwd
+        })
+
+        if (error) {
+          alert('Error: ' + error.message)
+        } else {
+          alert('Password updated! You can now log in.')
+          window.location.href = '/login'
+        }
+      })
+  </script>
+</body>
+</html>
+
