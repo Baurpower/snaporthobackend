@@ -26,45 +26,36 @@ func routes(_ app: Application) throws {
     
 
         // STEP 2: User clicks email link → hits /auth/confirm
-    app.get("auth", "confirm") { req -> EventLoopFuture<Response> in
-        guard let tokenHash = try? req.query.get(String.self, at: "token_hash"),
-              let type = try? req.query.get(String.self, at: "type") else {
-            throw Abort(.badRequest, reason: "Missing query parameters.")
+    app.get("auth", "confirm") { req async throws -> Response in
+        // 1) Extract token_hash & type
+        guard
+            let tokenHash: String = try? req.query.get(String.self, at: "token_hash"),
+            let type:      String = try? req.query.get(String.self, at: "type")
+        else {
+            throw Abort(.badRequest, reason: "Missing token_hash or type")
         }
 
-        // Accept either redirectUrl or next param
-        let redirectURL = (try? req.query.get(String.self, at: "redirectUrl")) ??
-                          (try? req.query.get(String.self, at: "next"))
-
-        guard let redirectURL = redirectURL else {
-            throw Abort(.badRequest, reason: "Missing query parameters.")
+        // 2) Make sure your service‐role key is present
+        guard Environment.get("SUPABASE_SERVICE_ROLE_KEY") != nil else {
+            req.logger.critical("❌ SUPABASE_SERVICE_ROLE_KEY not set")
+            throw Abort(.internalServerError)
         }
 
-        // Log what we got (helpful for debugging PKCE flow vs classic flow)
-        req.logger.info("🔑 Handling /auth/confirm → token_hash=\(tokenHash.prefix(10))..., type=\(type), redirectURL=\(redirectURL)")
+        let redirectPath = (try? req.query.get(String.self, at: "next")) ?? "/"
+        req.logger.info("🔑 /auth/confirm → token_hash=\(tokenHash.prefix(10))…, type=\(type), next=\(redirectPath)")
 
-        let supabase = SupabaseClient(httpClient: app.client, logger: req.logger)
-        return supabase.verifyOtp(type: type, tokenHash: tokenHash).flatMapThrowing { session in
-            req.logger.info("✅ Verified OTP → redirecting to \(redirectURL)")
-            return req.redirect(to: redirectURL)
+        // 3) Init client (it will pull URL+KEY from the env)
+        let supabase = SupabaseClient(httpClient: req.client, logger: req.logger)
+
+        // 4) Verify OTP and redirect
+        do {
+            _ = try await supabase.verifyOtp(type: type, tokenHash: tokenHash)
+            req.logger.info("✅ OTP OK → \(redirectPath)")
+            return req.redirect(to: redirectPath)
+        } catch {
+            req.logger.warning("⚠️ OTP failed: \(error.localizedDescription)")
+            return req.redirect(to: "/auth/auth-code-error")
         }
     }
-
-
-        // STEP 3: Frontend calls this to set the new password
-        app.post("auth", "update-password") { req -> EventLoopFuture<HTTPStatus> in
-            struct PasswordUpdateRequest: Content {
-                let newPassword: String
-            }
-
-            let updateReq = try req.content.decode(PasswordUpdateRequest.self)
-
-            let supabase = SupabaseClient(httpClient: app.client, logger: req.logger)
-            return supabase.updatePassword(newPassword: updateReq.newPassword).map {
-                req.logger.info("✅ Password updated successfully")
-                return .ok
-            }
-        }
-
     }
 
