@@ -34,6 +34,9 @@ let package = Package(
 
 
             ],
+            resources: [
+                            .copy("Public")
+                        ],
             swiftSettings: swiftSettings
         ),
         .testTarget(
