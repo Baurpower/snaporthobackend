@@ -4,6 +4,11 @@ import Fluent
 
 
 func routes(_ app: Application) throws {
+    
+        print("SERVICE ROLE KEY PREFIX: \(Environment.get("SUPABASE_SERVICE_ROLE_KEY")?.prefix(10) ?? "MISSING")")
+        
+   
+    
     // MARK: - 🔓 Public Routes
     
     app.get { req async in
