@@ -1,13 +1,13 @@
 import Vapor
 
+// MARK: - Controller
 struct YoutubeController: RouteCollection {
     func boot(routes: RoutesBuilder) throws {
         let video = routes.grouped("video-access")
-        video.get(":id", use: getVideoByID)
         video.get(use: getAllVideos)
+        video.get(":id", use: getVideoByID)
     }
 
-    // Updated video array
     private let videos: [Video] = [
         .init(
             id: "distal-radius",
