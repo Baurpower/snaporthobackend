@@ -12,39 +12,26 @@ extension Application {
     }
 }
 
-
 func routes(_ app: Application) throws {
-<<<<<<< HEAD
-    // just to verify your service‐role key is loaded
     print("SERVICE ROLE KEY PREFIX: \(Environment.get("SUPABASE_SERVICE_ROLE_KEY")?.prefix(10) ?? "MISSING")")
 
     // MARK: - 🔓 Public Routes
+    app.get { req async in "SnapOrtho Backend is live!" }
+    app.get("hello") { req async -> String in "Hello, world!" }
 
-    // root “It works!”
-    app.get { req async in
-        "It works!"
-    }
-
-    // simple hello world
-    app.get("hello") { req async -> String in
-        "Hello, world!"
-    }
-
-    // your controllers
+    // Register controllers
     try app.register(collection: TodoController())
-    try app.register(collection: VideoController())
+    try app.register(collection: YoutubeController()) // Ensure this matches your actual controller name
 
-    // STEP 2: User clicks email link → hits /auth/confirm
+    // MARK: - 🔐 Supabase Auth Email Confirmation
     app.get("auth", "confirm") { req async throws -> Response in
-        // 1) Extract token_hash & type
         guard
             let tokenHash: String = try? req.query.get(String.self, at: "token_hash"),
-            let type:      String = try? req.query.get(String.self, at: "type")
+            let type: String = try? req.query.get(String.self, at: "type")
         else {
             throw Abort(.badRequest, reason: "Missing token_hash or type")
         }
 
-        // 2) Check service‐role key
         guard Environment.get("SUPABASE_SERVICE_ROLE_KEY") != nil else {
             req.logger.critical("❌ SUPABASE_SERVICE_ROLE_KEY not set")
             throw Abort(.internalServerError)
@@ -53,10 +40,8 @@ func routes(_ app: Application) throws {
         let redirectPath = (try? req.query.get(String.self, at: "next")) ?? "/"
         req.logger.info("🔑 /auth/confirm → token_hash=\(tokenHash.prefix(10))…, type=\(type), next=\(redirectPath)")
 
-        // 3) Init client (reads URL + KEY from env)
         let supabase = SupabaseClient(httpClient: req.client, logger: req.logger)
 
-        // 4) Verify OTP and redirect
         do {
             _ = try await supabase.verifyOtp(type: type, tokenHash: tokenHash)
             req.logger.info("✅ OTP OK → \(redirectPath)")
@@ -66,24 +51,8 @@ func routes(_ app: Application) throws {
             return req.redirect(to: "/auth/auth-code-error")
         }
     }
-}
-=======
-    print("SERVICE ROLE KEY PREFIX: \(Environment.get("SUPABASE_SERVICE_ROLE_KEY")?.prefix(10) ?? "MISSING")")
 
-    // MARK: - Public Health Check
-    app.get { req async in "It works!" }
-    app.get("hello") { req async -> String in "Hello, world!" }
-
-    try app.register(collection: TodoController())
-    try app.register(collection: YoutubeController())
-    
-    app.get { req async in
-            "SnapOrtho Backend is live!"
-        }
-
-    // MARK: - Supabase Auth + Device Registration
-
-    /// Check login + register/update device
+    // MARK: - 🔄 Device Registration
     app.post("device", "register") { req async throws -> String in
         struct DeviceRegistrationRequest: Content {
             let deviceToken: String
@@ -97,7 +66,6 @@ func routes(_ app: Application) throws {
 
         let body = try req.content.decode(DeviceRegistrationRequest.self)
 
-        // 1. Get Supabase user info
         let supabase = SupabaseClient(
             supabaseURL: URL(string: "https://geznczcokbgybsseipjg.supabase.co")!,
             supabaseKey: Environment.get("SUPABASE_SERVICE_ROLE_KEY")!
@@ -117,7 +85,6 @@ func routes(_ app: Application) throws {
         struct SupabaseUser: Content { let id: String }
         let user = try res.content.decode(SupabaseUser.self)
 
-        // 2. Upsert into your Device table
         let now = Date()
 
         if let existing = try await Device.query(on: req.db)
@@ -143,15 +110,13 @@ func routes(_ app: Application) throws {
         }
     }
 
-    // MARK: - Supabase Login Status Check
-
+    // MARK: - ✅ Supabase Login Status Check
     app.get("auth", "status") { req async throws -> String in
         guard let token = req.headers.bearerAuthorization?.token else {
             throw Abort(.unauthorized, reason: "Missing Bearer token")
         }
 
-        let uri = URI(string: "https://<your-project-id>.supabase.co/auth/v1/user")
->>>>>>> recover-video-controller
+        let uri = URI(string: "https://geznczcokbgybsseipjg.supabase.co/auth/v1/user")
 
         var headers = HTTPHeaders()
         headers.add(name: .authorization, value: "Bearer \(token)")
@@ -167,3 +132,4 @@ func routes(_ app: Application) throws {
         }
     }
 }
+
