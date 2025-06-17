@@ -13,7 +13,7 @@ struct YoutubeController: RouteCollection {
             id: "distal-radius",
             title: "Distal Radius Fractures",
             description: "Classification and operative treatment pearls for DR fractures.",
-            youtubeURL: "https://www.youtube.com/watch?v=VIDEO_ID_2",
+            youtubeURL: "https://youtu.be/nSqiWf5Z-B0",
             category: "Trauma",
             isPreview: true
         )
