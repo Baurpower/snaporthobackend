@@ -1,3 +1,11 @@
+//
+//  CreateDevice.swift
+//  SnapOrthoBackend
+//
+//  Created by Alex Baur on 6/17/25.
+//
+
+
 import Fluent
 
 struct CreateDevice: Migration {
@@ -5,7 +13,7 @@ struct CreateDevice: Migration {
         database.schema("devices")
             .id()
             .field("device_token", .string, .required)
-            .field("learn_user_id", .string)
+            .field("learn_user_id", .string, .required)
             .field("platform", .string, .required)
             .field("app_version", .string, .required)
             .field("last_seen", .datetime, .required)

@@ -1,4 +1,7 @@
-final class Device: Model, Content {
+import Vapor
+import Fluent
+
+final class Device: Model, Content, @unchecked Sendable {
     static let schema = "devices"
 
     @ID(key: .id)
