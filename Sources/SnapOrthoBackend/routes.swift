@@ -65,19 +65,29 @@ func routes(_ app: Application) throws {
         }
 
         guard let bearer = req.headers.bearerAuthorization?.token
-        else { throw Abort(.unauthorized, reason: "Missing Bearer token") }
+        else {
+            req.logger.warning("❌ Missing Bearer token in /device/register")
+            throw Abort(.unauthorized, reason: "Missing Bearer token")
+        }
 
         let body = try req.content.decode(DeviceRegistration.self)
+        req.logger.info("📱 Received device token: \(body.deviceToken)")
+        req.logger.info("📲 Platform: \(body.platform), App Version: \(body.appVersion)")
 
-        // Validate token
+        // Validate Supabase token
         let userInfoURL = URI(string: "\(supabaseURL)/auth/v1/user")
         var hdrs = HTTPHeaders()
         hdrs.add(name: .authorization, value: "Bearer \(bearer)")
         let userResp = try await req.client.get(userInfoURL, headers: hdrs)
-        guard userResp.status == .ok else { return "❌ Supabase token invalid/expired" }
+
+        guard userResp.status == .ok else {
+            req.logger.warning("❌ Invalid Supabase token during device registration")
+            return "❌ Supabase token invalid/expired"
+        }
 
         struct SupabaseUser: Content { let id: String }
         let user = try userResp.content.decode(SupabaseUser.self)
+        req.logger.info("👤 Device linked to Supabase user \(user.id)")
 
         // Upsert device
         let now = Date()
@@ -85,6 +95,7 @@ func routes(_ app: Application) throws {
             .filter(\.$deviceToken == body.deviceToken)
             .first()
         {
+            req.logger.info("🔁 Updating existing device record")
             existing.learnUserId = user.id
             existing.platform    = body.platform
             existing.appVersion  = body.appVersion
@@ -92,6 +103,7 @@ func routes(_ app: Application) throws {
             try await existing.save(on: req.db)
             return "✅ Updated device for user \(user.id)"
         } else {
+            req.logger.info("🆕 Creating new device record")
             let device = Device(
                 deviceToken: body.deviceToken,
                 learnUserId: user.id,
