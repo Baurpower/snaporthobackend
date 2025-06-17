@@ -1,0 +1,37 @@
+import Vapor
+
+struct YoutubeController: RouteCollection {
+    func boot(routes: RoutesBuilder) throws {
+        let video = routes.grouped("video-access")
+        video.get(":id", use: getVideoByID)
+        video.get(use: getAllVideos)
+    }
+
+    // Updated video array
+    private let videos: [Video] = [
+        .init(
+            id: "distal-radius",
+            title: "Distal Radius Fractures",
+            description: "Classification and operative treatment pearls for DR fractures.",
+            youtubeURL: "https://www.youtube.com/watch?v=VIDEO_ID_2",
+            category: "Trauma",
+            isPreview: true
+        )
+    ]
+
+    func getAllVideos(req: Request) async throws -> [Video] {
+        return videos
+    }
+
+    func getVideoByID(req: Request) async throws -> Video {
+        guard let id = req.parameters.get("id") else {
+            throw Abort(.badRequest, reason: "Missing video ID")
+        }
+
+        guard let video = videos.first(where: { $0.id == id }) else {
+            throw Abort(.notFound, reason: "Video not found")
+        }
+
+        return video
+    }
+}

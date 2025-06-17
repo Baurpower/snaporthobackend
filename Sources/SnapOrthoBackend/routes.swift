@@ -22,7 +22,11 @@ func routes(_ app: Application) throws {
     app.get("hello") { req async -> String in "Hello, world!" }
 
     try app.register(collection: TodoController())
-    try app.register(collection: VideoController())
+    try app.register(collection: YoutubeController())
+    
+    app.get { req async in
+            "SnapOrtho Backend is live!"
+        }
 
     // MARK: - Supabase Auth + Device Registration
 
