@@ -57,64 +57,57 @@ func routes(_ app: Application) throws {
     }
 
     // ───────── 3. /device/register ─────────
+    struct DeviceRegistration: Content {
+        let deviceToken: String
+        let platform:    String
+        let appVersion:  String
+        let isAuthenticated: Bool
+    }
+
     app.post("device", "register") { req async throws -> String in
-        struct DeviceRegistration: Content {
-            let deviceToken: String
-            let platform:    String
-            let appVersion:  String
-        }
-
-        guard let bearer = req.headers.bearerAuthorization?.token
-        else {
-            req.logger.warning("❌ Missing Bearer token in /device/register")
-            throw Abort(.unauthorized, reason: "Missing Bearer token")
-        }
-
         let body = try req.content.decode(DeviceRegistration.self)
-        req.logger.info("📱 Received device token: \(body.deviceToken)")
-        req.logger.info("📲 Platform: \(body.platform), App Version: \(body.appVersion)")
+        let bearer = req.headers.bearerAuthorization?.token
 
-        // Validate Supabase token
-        let userInfoURL = URI(string: "\(supabaseURL)/auth/v1/user")
-        var hdrs = HTTPHeaders()
-        hdrs.add(name: .authorization, value: "Bearer \(bearer)")
-        let userResp = try await req.client.get(userInfoURL, headers: hdrs)
+        var userId = "anonymous"
 
-        guard userResp.status == .ok else {
-            req.logger.warning("❌ Invalid Supabase token during device registration")
-            return "❌ Supabase token invalid/expired"
+        if body.isAuthenticated, let token = bearer {
+            let userInfoURL = URI(string: "\(supabaseURL)/auth/v1/user")
+            var hdrs = HTTPHeaders()
+            hdrs.add(name: .authorization, value: "Bearer \(token)")
+
+            let userResp = try await req.client.get(userInfoURL, headers: hdrs)
+            if userResp.status == .ok {
+                struct SupabaseUser: Content { let id: String }
+                userId = try userResp.content.decode(SupabaseUser.self).id
+            }
         }
 
-        struct SupabaseUser: Content { let id: String }
-        let user = try userResp.content.decode(SupabaseUser.self)
-        req.logger.info("👤 Device linked to Supabase user \(user.id)")
+        print("📬 Registering device: \(body.deviceToken.prefix(10))… for user: \(userId)")
 
-        // Upsert device
         let now = Date()
         if let existing = try await Device.query(on: req.db)
             .filter(\.$deviceToken == body.deviceToken)
             .first()
         {
-            req.logger.info("🔁 Updating existing device record")
-            existing.learnUserId = user.id
+            existing.learnUserId = userId
             existing.platform    = body.platform
             existing.appVersion  = body.appVersion
             existing.lastSeen    = now
             try await existing.save(on: req.db)
-            return "✅ Updated device for user \(user.id)"
+            return "✅ Updated device"
         } else {
-            req.logger.info("🆕 Creating new device record")
             let device = Device(
                 deviceToken: body.deviceToken,
-                learnUserId: user.id,
+                learnUserId: userId,
                 platform:    body.platform,
                 appVersion:  body.appVersion,
                 lastSeen:    now
             )
             try await device.save(on: req.db)
-            return "✅ Registered new device for user \(user.id)"
+            return "✅ Registered new device"
         }
     }
+
 
     // ───────── 4. /auth/status ─────────
     app.get("auth", "status") { req async throws -> String in
