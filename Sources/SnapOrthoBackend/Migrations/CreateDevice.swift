@@ -1,11 +1,3 @@
-//
-//  CreateDevice.swift
-//  SnapOrthoBackend
-//
-//  Created by Alex Baur on 6/17/25.
-//
-
-
 import Fluent
 
 struct CreateDevice: Migration {
@@ -17,6 +9,15 @@ struct CreateDevice: Migration {
             .field("platform", .string, .required)
             .field("app_version", .string, .required)
             .field("last_seen", .datetime, .required)
+
+            // ✅ Notification-friendly additions
+            .field("language", .string)                         // e.g., "en", "es"
+            .field("timezone", .string)                         // e.g., "America/New_York"
+            .field("receive_notifications", .bool, .sql(.default(true)))  // opt-out logic
+            .field("last_notified", .datetime)                  // track most recent notification
+            .field("created_at", .datetime, .required)
+            .field("updated_at", .datetime, .required)
+
             .unique(on: "device_token")
             .create()
     }

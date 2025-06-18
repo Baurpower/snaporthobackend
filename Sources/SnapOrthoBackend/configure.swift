@@ -1,41 +1,53 @@
-import NIOSSL
-import Fluent
-import FluentPostgresDriver
 import Vapor
+import Fluent
+import FluentPostgresDriver   // ✅ Required for .postgres & DatabaseID.psql
+import NIOSSL                 // ✅ TLSConfiguration
+import NIOCore                // ✅ TimeAmount
 
-public func configure(_ app: Application) async throws {
-    
-    // MARK: - 📦 Database via Environment
+public func configure(_ app: Application) throws {
+
+    // ─────────────  ENV  ─────────────
     guard
-        let dbHost     = Environment.get("DATABASE_HOST"),
-        let dbUsername = Environment.get("DATABASE_USERNAME"),
-        let dbPassword = Environment.get("DATABASE_PASSWORD"),
-        let dbName     = Environment.get("DATABASE_NAME")
+        let host = Environment.get("DATABASE_HOST"),
+        let user = Environment.get("DATABASE_USERNAME"),
+        let pass = Environment.get("DATABASE_PASSWORD"),
+        let name = Environment.get("DATABASE_NAME")
     else {
-        app.logger.critical("❌ Missing one or more database environment variables")
-        throw Abort(.internalServerError, reason: "Missing database config")
+        app.logger.critical("❌ Missing DB environment variables")
+        throw Abort(.internalServerError)
     }
 
-    // ✅ NEW PostgresConfiguration (Vapor 4+)
-    let postgresConfig = PostgresConfiguration(
-        url: "postgres://\(dbUsername):\(dbPassword)@\(dbHost):5432/\(dbName)"
-    )!
+    // ─────────────  TLS  ─────────────
+    var tlsConfig = TLSConfiguration.makeClientConfiguration()
+    tlsConfig.certificateVerification = .none   // ⚠️ Disable only in dev/testing
 
-    app.databases.use(.postgres(configuration: postgresConfig), as: .psql)
+    // 👇 FluentPostgresDriver config with TLS
+    var postgresConfig = PostgresConfiguration(
+        hostname: host,
+        port: 5432,
+        username: user,
+        password: pass,
+        database: name
+    )
+    postgresConfig.tlsConfiguration = tlsConfig
 
-    // MARK: - 📚 Migrations
+    // ─────────────  Register DB with pooling  ─────────────
+    app.databases.use(.postgres(
+        configuration: postgresConfig,
+        maxConnectionsPerEventLoop: 4,
+        connectionPoolTimeout: TimeAmount.seconds(20)
+    ), as: .psql)
+
+    // ─────────────  Migrations  ─────────────
     app.migrations.add(CreateTodo())
     app.migrations.add(CreateDevice())
 
-    // MARK: - 🔐 Supabase Service Role Key
+    // ─────────────  Supabase Key  ─────────────
     guard let supaKey = Environment.get("SUPABASE_SERVICE_ROLE_KEY") else {
-        app.logger.critical("❌ Missing SUPABASE_SERVICE_ROLE_KEY in environment")
-        throw Abort(.internalServerError, reason: "Missing Supabase service role key")
+        throw Abort(.internalServerError)
     }
-
     app.storage[SupabaseServiceKeyStorageKey.self] = supaKey
-    app.logger.info("✅ Supabase service role key loaded")
 
-    // MARK: - 🌐 Routes
+    // ─────────────  Routes  ─────────────
     try routes(app)
 }
