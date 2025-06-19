@@ -53,28 +53,28 @@ public func configure(_ app: Application) throws {
     app.storage[SupabaseServiceKeyStorageKey.self] = supaKey
 
     // ───── APNs CONFIG (VaporAPNS) ─────
-    let privateKeyString = try String(contentsOfFile: "/etc/apns/AuthKey_2V7UF5DPS4.p8", encoding: .utf8)
-
-    
-    let apnsConfig = try APNSClientConfiguration(
-        authenticationMethod: .jwt(
-            privateKey: try .loadFrom(string: "/etc/apns/AuthKey_2V7UF5DPS4.p8"),
-            keyIdentifier: "2V7UF5DPS4",
-            teamIdentifier: "MLMGMULY2P"
-        ),
-        environment: .production
-    )
-
-
-    // Register the configuration with Vapor’s APNS container
-    app.apns.containers.use(
-        apnsConfig,
-        eventLoopGroupProvider: .shared(app.eventLoopGroup),
-        responseDecoder: JSONDecoder(),
-        requestEncoder: JSONEncoder(),
-        as: .default
-    )
-    // ───── End APN
+//    let privateKeyString = try String(contentsOfFile: "/etc/apns/AuthKey_2V7UF5DPS4.p8", encoding: .utf8)
+//
+//    
+//    let apnsConfig = try APNSClientConfiguration(
+//        authenticationMethod: .jwt(
+//            privateKey: try .loadFrom(string: "/etc/apns/AuthKey_2V7UF5DPS4.p8"),
+//            keyIdentifier: "2V7UF5DPS4",
+//            teamIdentifier: "MLMGMULY2P"
+//        ),
+//        environment: .production
+//    )
+//
+//
+//    // Register the configuration with Vapor’s APNS container
+//    app.apns.containers.use(
+//        apnsConfig,
+//        eventLoopGroupProvider: .shared(app.eventLoopGroup),
+//        responseDecoder: JSONDecoder(),
+//        requestEncoder: JSONEncoder(),
+//        as: .default
+//    )
+//    // ───── End APN
 
         try routes(app)
     }
