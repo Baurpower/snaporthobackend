@@ -3,6 +3,9 @@ import Fluent
 import FluentPostgresDriver   // ✅ Required for .postgres & DatabaseID.psql
 import NIOSSL                 // ✅ TLSConfiguration
 import NIOCore                // ✅ TimeAmount
+import APNS
+import VaporAPNS
+import APNSCore
 
 public func configure(_ app: Application) throws {
     app.http.server.configuration.hostname = "0.0.0.0"
@@ -49,6 +52,26 @@ public func configure(_ app: Application) throws {
     }
     app.storage[SupabaseServiceKeyStorageKey.self] = supaKey
 
-    // ─────────────  Routes  ─────────────
-    try routes(app)
-}
+    // ───── APNs CONFIG (VaporAPNS) ─────
+
+    let apnsConfig = APNSClientConfiguration(
+        authenticationMethod: .jwt(
+            privateKey: try .loadFrom(string: "/etc/apns/AuthKey_252TDG76JS.p8"),
+            keyIdentifier: "252TDG76JS",       // ← Key ID from Apple portal
+            teamIdentifier: "MLMGMULY2P"       // ← Your Team ID
+        ),
+        environment: .sandbox               // use .sandbox for debug-build devices
+    )
+
+    // Register the configuration with Vapor’s APNS container
+    app.apns.containers.use(
+        apnsConfig,
+        eventLoopGroupProvider: .shared(app.eventLoopGroup),
+        responseDecoder: JSONDecoder(),
+        requestEncoder: JSONEncoder(),
+        as: .default
+    )
+    // ───── End APN
+
+        try routes(app)
+    }

@@ -18,7 +18,8 @@ let package = Package(
         .package(
                     url: "https://github.com/supabase/supabase-swift.git",
                     from: "2.0.0"
-                )
+                ),
+        .package(url: "https://github.com/vapor/apns.git",   from: "4.2.0")
 
 
         
@@ -34,7 +35,8 @@ let package = Package(
                 .product(name: "Vapor", package: "vapor"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
-                .product(name: "Supabase", package: "supabase-swift")
+                .product(name: "Supabase", package: "supabase-swift"),
+                .product(name: "VaporAPNS", package: "apns")
 
 
             ],

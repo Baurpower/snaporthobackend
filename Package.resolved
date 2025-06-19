@@ -1,6 +1,24 @@
 {
-  "originHash" : "ea9e8f209a7cf0107e86a8afcce0b2c5285a68266e91f3ed6d26109c6428b8b5",
+  "originHash" : "96deba22d9d38a3632adc45fe7acb26d895cc4e5c0c8b07cd9bd69a9e591a86c",
   "pins" : [
+    {
+      "identity" : "apns",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/vapor/apns.git",
+      "state" : {
+        "revision" : "dedccc1243efbfcaf86dd1810a3759c4ab36cdb4",
+        "version" : "4.2.0"
+      }
+    },
+    {
+      "identity" : "apnswift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swift-server-community/APNSwift.git",
+      "state" : {
+        "revision" : "36fec7e6ca5e99c6049771601770a5488021e19a",
+        "version" : "5.1.0"
+      }
+    },
     {
       "identity" : "async-http-client",
       "kind" : "remoteSourceControl",
@@ -195,8 +213,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-distributed-tracing.git",
       "state" : {
-        "revision" : "a64a0abc2530f767af15dd88dda7f64d5f1ff9de",
-        "version" : "1.2.0"
+        "revision" : "b78796709d243d5438b36e74ce3c5ec2d2ece4d8",
+        "version" : "1.2.1"
       }
     },
     {
@@ -267,8 +285,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-nio-ssl.git",
       "state" : {
-        "revision" : "4b38f35946d00d8f6176fe58f96d83aba64b36c7",
-        "version" : "2.31.0"
+        "revision" : "36b48956eb6c0569215dc15a587b491d2bb36122",
+        "version" : "2.32.0"
       }
     },
     {
