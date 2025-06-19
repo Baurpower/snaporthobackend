@@ -53,15 +53,18 @@ public func configure(_ app: Application) throws {
     app.storage[SupabaseServiceKeyStorageKey.self] = supaKey
 
     // ───── APNs CONFIG (VaporAPNS) ─────
+    let privateKeyString = try String(contentsOfFile: "/etc/apns/AuthKey_2V7UF5DPS4.p8", encoding: .utf8)
 
-    let apnsConfig = APNSClientConfiguration(
+    
+    let apnsConfig = try APNSClientConfiguration(
         authenticationMethod: .jwt(
-            privateKey: try .loadFrom(string: "/etc/apns/AuthKey_252TDG76JS.p8"),
-            keyIdentifier: "252TDG76JS",       // ← Key ID from Apple portal
-            teamIdentifier: "MLMGMULY2P"       // ← Your Team ID
+            privateKey: try .loadFrom(string: "/etc/apns/AuthKey_2V7UF5DPS4.p8"),
+            keyIdentifier: "2V7UF5DPS4",
+            teamIdentifier: "MLMGMULY2P"
         ),
-        environment: .sandbox               // use .sandbox for debug-build devices
+        environment: .production
     )
+
 
     // Register the configuration with Vapor’s APNS container
     app.apns.containers.use(
