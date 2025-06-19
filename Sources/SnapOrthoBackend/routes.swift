@@ -69,7 +69,12 @@ func routes(_ app: Application) throws {
         let platform: String
         let appVersion: String
         let isAuthenticated: Bool?
+        
+        // Optional extras
+        let language: String?
+        let timezone: String?
     }
+
 
     app.post("device", "register") { req async throws -> HTTPStatus in
         let payload = try req.content.decode(RegisterDevicePayload.self)
@@ -90,6 +95,9 @@ func routes(_ app: Application) throws {
         {
             existing.learnUserId = learnUserId
             existing.lastSeen = now
+            existing.updatedAt = now
+            existing.language = payload.language
+            existing.timezone = payload.timezone
             try await existing.update(on: req.db)
         } else {
             let new = Device(
@@ -97,14 +105,21 @@ func routes(_ app: Application) throws {
                 learnUserId: learnUserId,
                 platform: payload.platform,
                 appVersion: payload.appVersion,
-                lastSeen: now
+                lastSeen: now,
+                language: payload.language,
+                timezone: payload.timezone,
+                receiveNotifications: true,
+                lastNotified: nil,
+                createdAt: now,
+                updatedAt: now
             )
             try await new.create(on: req.db)
         }
 
-        print("📬 Registered \(payload.deviceToken.prefix(10))… for \(learnUserId)")
+        req.logger.info("📬 Registered \(payload.deviceToken.prefix(10))… for \(learnUserId)")
         return .ok
     }
+
 
     // ───────── 4. /auth/status (user fetch) ─────────
     app.get("auth", "status") { req async throws -> String in
