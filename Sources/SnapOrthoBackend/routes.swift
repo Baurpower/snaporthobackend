@@ -109,9 +109,7 @@ func routes(_ app: Application) throws {
                 language: payload.language,
                 timezone: payload.timezone,
                 receiveNotifications: true,
-                lastNotified: nil,
-                createdAt: now,
-                updatedAt: now
+                lastNotified: nil
             )
             try await new.create(on: req.db)
         }

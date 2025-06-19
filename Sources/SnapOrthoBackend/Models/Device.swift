@@ -22,7 +22,6 @@ final class Device: Model, Content, @unchecked Sendable {
     @Field(key: "last_seen")
     var lastSeen: Date
 
-    // ✅ Notification-friendly additions
     @Field(key: "language")
     var language: String?
 
@@ -35,11 +34,11 @@ final class Device: Model, Content, @unchecked Sendable {
     @Field(key: "last_notified")
     var lastNotified: Date?
 
-    @Field(key: "created_at")
-    var createdAt: Date
+    @Timestamp(key: "created_at", on: .create)
+    var createdAt: Date?
 
-    @Field(key: "updated_at")
-    var updatedAt: Date
+    @Timestamp(key: "updated_at", on: .update)
+    var updatedAt: Date?
 
     init() {}
 
@@ -52,9 +51,7 @@ final class Device: Model, Content, @unchecked Sendable {
         language: String? = nil,
         timezone: String? = nil,
         receiveNotifications: Bool? = true,
-        lastNotified: Date? = nil,
-        createdAt: Date = Date(),
-        updatedAt: Date = Date()
+        lastNotified: Date? = nil
     ) {
         self.deviceToken = deviceToken
         self.learnUserId = learnUserId
@@ -65,7 +62,5 @@ final class Device: Model, Content, @unchecked Sendable {
         self.timezone = timezone
         self.receiveNotifications = receiveNotifications
         self.lastNotified = lastNotified
-        self.createdAt = createdAt
-        self.updatedAt = updatedAt
     }
 }
