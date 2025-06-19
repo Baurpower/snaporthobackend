@@ -69,22 +69,38 @@ func routes(_ app: Application) throws {
         let platform: String
         let appVersion: String
         let isAuthenticated: Bool?
-        
+
         // Optional extras
         let language: String?
         let timezone: String?
     }
 
-
     app.post("device", "register") { req async throws -> HTTPStatus in
+        let timestamp = Date().description
+        print("🔥 [\(timestamp)] /device/register HIT")
+        req.logger.info("🔥 /device/register HIT at \(timestamp)")
+
         let payload = try req.content.decode(RegisterDevicePayload.self)
+
+        print("📦 Payload deviceToken: \(payload.deviceToken.prefix(10))..., platform: \(payload.platform), appVersion: \(payload.appVersion)")
+        req.logger.info("📦 deviceToken=\(payload.deviceToken.prefix(10))..., platform=\(payload.platform), version=\(payload.appVersion)")
 
         // Optional: decode Supabase UID from JWT
         let learnUserId: String
         if let authHeader = req.headers.bearerAuthorization {
-            learnUserId = try decodeSupabaseUID(from: authHeader.token)
+            do {
+                learnUserId = try decodeSupabaseUID(from: authHeader.token)
+                print("🔑 Decoded Supabase UID: \(learnUserId)")
+                req.logger.info("🔑 Decoded Supabase UID: \(learnUserId)")
+            } catch {
+                print("❌ Failed to decode JWT")
+                req.logger.error("❌ JWT decode failed: \(error)")
+                throw Abort(.unauthorized, reason: "Invalid token")
+            }
         } else {
             learnUserId = "anonymous"
+            print("👤 No token provided. Using: anonymous")
+            req.logger.info("👤 No token → using anonymous")
         }
 
         let now = Date()
@@ -93,13 +109,16 @@ func routes(_ app: Application) throws {
             .filter(\.$deviceToken == payload.deviceToken)
             .first()
         {
+            print("♻️ Updating existing device: \(existing.id?.uuidString ?? "nil")")
+            req.logger.info("♻️ Updating existing device for user: \(learnUserId)")
+
             existing.learnUserId = learnUserId
             existing.lastSeen = now
-            existing.updatedAt = now
             existing.language = payload.language
             existing.timezone = payload.timezone
             try await existing.update(on: req.db)
         } else {
+            print("🆕 Creating new device record...")
             let new = Device(
                 deviceToken: payload.deviceToken,
                 learnUserId: learnUserId,
@@ -114,7 +133,8 @@ func routes(_ app: Application) throws {
             try await new.create(on: req.db)
         }
 
-        req.logger.info("📬 Registered \(payload.deviceToken.prefix(10))… for \(learnUserId)")
+        print("✅ [\(timestamp)] Registered device for \(learnUserId)")
+        req.logger.info("✅ Registered device for \(learnUserId)")
         return .ok
     }
 
