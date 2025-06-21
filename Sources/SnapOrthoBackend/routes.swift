@@ -1,6 +1,8 @@
 import Vapor
 import Fluent
 import Supabase
+import APNS
+import APNSCore
 
 // MARK: – Supabase service-role key storage
 struct SupabaseServiceKeyStorageKey: StorageKey { typealias Value = String }
@@ -138,7 +140,6 @@ func routes(_ app: Application) throws {
         return .ok
     }
 
-
     // ───────── 4. /auth/status (user fetch) ─────────
     app.get("auth", "status") { req async throws -> String in
         guard let bearer = req.headers.bearerAuthorization?.token
@@ -157,6 +158,36 @@ func routes(_ app: Application) throws {
         } else {
             return "❌ Not logged in"
         }
+    }
+
+    // ───────── 5. /send-test-push ─────────
+    struct TestPayload: Codable {
+        let acme1: String
+        let acme2: Int
+    }
+
+    app.get("send-test-push") { req async throws -> String in
+        let token = "bf848b3b4722372799f11dbe7dc1a465b11f1124c93f2fd79ab2b6270702316f"
+
+        let payload = TestPayload(acme1: "Hello", acme2: 2)
+
+        let notification = APNSAlertNotification(
+            alert: .init(
+                title: .raw("SnapOrtho"),
+                subtitle: .raw("Your test push worked 🚀")
+            ),
+            expiration: .immediately,
+            priority: .immediately,
+            topic: "com.alexbaur.Snap-Ortho", // <-- Replace with your bundle ID
+            payload: payload
+        )
+
+        try await req.apns.client.sendAlertNotification(
+            notification,
+            deviceToken: token
+        )
+
+        return "✅ Sent push to token: \(token.prefix(8))..."
     }
 }
 
