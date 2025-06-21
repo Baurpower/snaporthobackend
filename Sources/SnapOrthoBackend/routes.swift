@@ -189,7 +189,75 @@ func routes(_ app: Application) throws {
 
         return "✅ Sent push to token: \(token.prefix(8))..."
     }
+    // ───────── 6. /send-missed-users-push ─────────
+    app.get("send-missed-users-push") { req async throws -> String in
+        let oneWeekAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date())!
+        
+        let inactiveDevices = try await Device.query(on: req.db)
+            .filter(\.$lastSeen < oneWeekAgo)
+            .filter(\.$receiveNotifications == true)
+            .all()
+
+        var successCount = 0
+        var failureCount = 0
+
+        for device in inactiveDevices {
+            guard !device.deviceToken.isEmpty else { continue }
+
+            struct ReminderPayload: Codable {
+                let reminder: String
+            }
+
+            let payload = ReminderPayload(reminder: "We miss you!")
+
+            let notification = APNSAlertNotification(
+                alert: .init(
+                    title: .raw("We miss you!"),
+                    subtitle: .raw("Get back in and crush your next ortho rotation 💪.")),
+                expiration: .immediately,
+                priority: .immediately,
+                topic: "com.alexbaur.Snap-Ortho",
+                payload: payload
+            )
+
+            do {
+                try await req.apns.client.sendAlertNotification(notification, deviceToken: device.deviceToken)
+                req.logger.info("✅ Push sent to: \(device.deviceToken.prefix(10))")
+                successCount += 1
+            } catch {
+                req.logger.error("❌ Push failed to \(device.deviceToken.prefix(10)): \(error.localizedDescription)")
+                failureCount += 1
+            }
+        }
+
+        return "Push attempt finished. Success: \(successCount), Failures: \(failureCount)"
+    }
+    
+    //Database debug
+    
+    app.get("debug", "devices") { req async throws -> String in
+        let devices = try await Device.query(on: req.db).all()
+
+        var result = "📱 Registered Devices:\n"
+        for device in devices {
+            result += """
+            - Token: \(device.deviceToken.prefix(10))...
+              UserID: \(device.learnUserId)
+              Last Seen: \(device.lastSeen)
+              Notifications: \(device.receiveNotifications ? "✅" : "❌")
+              Platform: \(device.platform)
+              App Version: \(device.appVersion)
+              Timezone: \(device.timezone ?? "N/A")
+            
+            """
+        }
+
+        return result.isEmpty ? "❌ No devices found." : result
+    }
+
 }
+
+
 
 // MARK: – JWT decoder for Supabase UID
 func decodeSupabaseUID(from jwt: String) throws -> String {

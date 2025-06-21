@@ -29,7 +29,7 @@ final class Device: Model, Content, @unchecked Sendable {
     var timezone: String?
 
     @Field(key: "receive_notifications")
-    var receiveNotifications: Bool?
+       var receiveNotifications: Bool
 
     @Field(key: "last_notified")
     var lastNotified: Date?
@@ -60,7 +60,7 @@ final class Device: Model, Content, @unchecked Sendable {
         self.lastSeen = lastSeen
         self.language = language
         self.timezone = timezone
-        self.receiveNotifications = receiveNotifications
+        self.receiveNotifications = receiveNotifications ?? true
         self.lastNotified = lastNotified
     }
 }
