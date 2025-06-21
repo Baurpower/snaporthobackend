@@ -233,6 +233,49 @@ func routes(_ app: Application) throws {
         return "Push attempt finished. Success: \(successCount), Failures: \(failureCount)"
     }
     
+    app.get("send-broadcast-push") { req async throws -> String in
+        let devices = try await Device.query(on: req.db)
+            .filter(\.$receiveNotifications == true)
+            .all()
+
+        var successCount = 0
+        var failureCount = 0
+
+        for device in devices {
+            guard !device.deviceToken.isEmpty else { continue }
+
+            struct BroadcastPayload: Codable {
+                let message: String
+            }
+
+            let payload = BroadcastPayload(message: "Time to sharpen your skills!")
+
+            let notification = APNSAlertNotification(
+                alert: .init(
+                    title: .raw("Ready for ortho rotations?"),
+                    subtitle: .raw("Sharpen your fracture conference skills in Practice 🦴📊")
+                ),
+                expiration: .immediately,
+                priority: .immediately,
+                topic: "com.alexbaur.Snap-Ortho",
+                payload: payload
+            )
+
+
+            do {
+                try await req.apns.client.sendAlertNotification(notification, deviceToken: device.deviceToken)
+                req.logger.info("✅ Broadcast push sent to: \(device.deviceToken.prefix(10))")
+                successCount += 1
+            } catch {
+                req.logger.error("❌ Broadcast push failed to \(device.deviceToken.prefix(10)): \(error.localizedDescription)")
+                failureCount += 1
+            }
+        }
+
+        return "Broadcast complete. Success: \(successCount), Failures: \(failureCount)"
+    }
+
+    
     //Database debug
     
     app.get("debug", "devices") { req async throws -> String in
