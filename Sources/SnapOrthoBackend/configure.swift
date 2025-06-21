@@ -1,8 +1,8 @@
 import Vapor
 import Fluent
-import FluentPostgresDriver   // ✅ Required for .postgres & DatabaseID.psql
-import NIOSSL                 // ✅ TLSConfiguration
-import NIOCore                // ✅ TimeAmount
+import FluentPostgresDriver
+import NIOSSL
+import NIOCore
 import APNS
 import VaporAPNS
 import APNSCore
@@ -23,9 +23,8 @@ public func configure(_ app: Application) throws {
 
     // ─────────────  TLS  ─────────────
     var tlsConfig = TLSConfiguration.makeClientConfiguration()
-    tlsConfig.certificateVerification = .none   // ⚠️ Disable only in dev/testing
+    tlsConfig.certificateVerification = .none   // ⚠️ Use .fullVerification in production
 
-    // 👇 FluentPostgresDriver config with TLS
     var postgresConfig = PostgresConfiguration(
         hostname: host,
         port: 5432,
@@ -35,12 +34,11 @@ public func configure(_ app: Application) throws {
     )
     postgresConfig.tlsConfiguration = tlsConfig
 
-    // ─────────────  Register DB with pooling  ─────────────
-    app.databases.use(.postgres(
-        configuration: postgresConfig,
-        maxConnectionsPerEventLoop: 4,
-        connectionPoolTimeout: TimeAmount.seconds(20)
-    ), as: .psql)
+    // ─────────────  Register DB  ─────────────
+    app.databases.use(
+        .postgres(configuration: postgresConfig, maxConnectionsPerEventLoop: 4, connectionPoolTimeout: .seconds(20)),
+        as: .psql
+    )
 
     // ─────────────  Migrations  ─────────────
     app.migrations.add(CreateTodo())
@@ -52,29 +50,25 @@ public func configure(_ app: Application) throws {
     }
     app.storage[SupabaseServiceKeyStorageKey.self] = supaKey
 
-    // ───── APNs CONFIG (VaporAPNS) ─────
-//    let privateKeyString = try String(contentsOfFile: "/etc/apns/AuthKey_2V7UF5DPS4.p8", encoding: .utf8)
-//
-//    
-//    let apnsConfig = try APNSClientConfiguration(
-//        authenticationMethod: .jwt(
-//            privateKey: try .loadFrom(string: "/etc/apns/AuthKey_2V7UF5DPS4.p8"),
-//            keyIdentifier: "2V7UF5DPS4",
-//            teamIdentifier: "MLMGMULY2P"
-//        ),
-//        environment: .production
-//    )
-//
-//
-//    // Register the configuration with Vapor’s APNS container
-//    app.apns.containers.use(
-//        apnsConfig,
-//        eventLoopGroupProvider: .shared(app.eventLoopGroup),
-//        responseDecoder: JSONDecoder(),
-//        requestEncoder: JSONEncoder(),
-//        as: .default
-//    )
-//    // ───── End APN
+    // ─────────────  APNs CONFIG  ─────────────
+    let apnsConfig = try APNSClientConfiguration(
+        authenticationMethod: .jwt(
+            privateKey: try .loadFrom(string: String(contentsOfFile: "/etc/apns/AuthKey_2V7UF5DPS4.p8")),
+            keyIdentifier: "2V7UF5DPS4",
+            teamIdentifier: "MLMGMULY2P"
+        ),
+        environment: .sandbox
+    )
 
-        try routes(app)
-    }
+
+    app.apns.containers.use(
+        apnsConfig,
+        eventLoopGroupProvider: .shared(app.eventLoopGroup),
+        responseDecoder: JSONDecoder(),
+        requestEncoder: JSONEncoder(),
+        as: .default
+    )
+
+    // ─────────────  ROUTES  ─────────────
+    try routes(app)
+}
