@@ -57,7 +57,7 @@ public func configure(_ app: Application) throws {
             keyIdentifier: "2V7UF5DPS4",
             teamIdentifier: "MLMGMULY2P"
         ),
-        environment: .sandbox
+        environment: .production
     )
 
 
