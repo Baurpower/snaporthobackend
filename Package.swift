@@ -19,7 +19,12 @@ let package = Package(
                     url: "https://github.com/supabase/supabase-swift.git",
                     from: "2.0.0"
                 ),
-        .package(url: "https://github.com/vapor/apns.git",   from: "4.2.0")
+        .package(url: "https://github.com/vapor/apns.git",   from: "4.2.0"),
+        .package(url: "https://github.com/awslabs/aws-sdk-swift", from: "1.3.41"),
+        .package(url: "https://github.com/soto-project/soto", from: "7.7.0"),
+        .package(url: "https://github.com/CoreOffice/XMLCoder", from: "0.17.1")
+
+
 
 
         
@@ -36,7 +41,12 @@ let package = Package(
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "Supabase", package: "supabase-swift"),
-                .product(name: "VaporAPNS", package: "apns")
+                .product(name: "VaporAPNS", package: "apns"),
+                .product(name: "AWSS3", package: "aws-sdk-swift"),
+                .product(name: "SotoS3", package: "soto"),
+                .product(name: "XMLCoder", package: "XMLCoder")
+
+
 
 
             ],

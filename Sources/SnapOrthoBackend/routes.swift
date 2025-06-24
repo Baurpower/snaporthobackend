@@ -3,6 +3,8 @@ import Fluent
 import Supabase
 import APNS
 import APNSCore
+import PostgresKit
+
 
 // MARK: – Supabase service-role key storage
 struct SupabaseServiceKeyStorageKey: StorageKey { typealias Value = String }
@@ -297,6 +299,37 @@ func routes(_ app: Application) throws {
 
         return result.isEmpty ? "❌ No devices found." : result
     }
+    
+    let crawler = PublicS3Crawler()
+
+        /// GET /images -- all images in the bucket
+        app.get("images") { req async throws -> [ImageMetadata] in
+            try await crawler.fetchAll(on: req)
+        }
+    
+    app.post("log-donation") { req async throws -> HTTPStatus in
+            struct Donation: Content {
+                let name: String
+                let email: String
+                let message: String?
+                let amount: Int
+                let stripe_id: String
+            }
+
+            let donation = try req.content.decode(Donation.self)
+
+            try await (req.db as! PostgresDatabase).sql().raw("""
+                INSERT INTO donations (name, email, message, amount, stripe_id, status)
+                VALUES (\(bind: donation.name),
+                        \(bind: donation.email),
+                        \(bind: donation.message ?? ""),
+                        \(bind: donation.amount),
+                        \(bind: donation.stripe_id),
+                        'paid')
+            """).run()
+
+            return .ok
+        }
 
 }
 
