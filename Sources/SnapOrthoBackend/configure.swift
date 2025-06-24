@@ -68,6 +68,15 @@ public func configure(_ app: Application) throws {
         requestEncoder: JSONEncoder(),
         as: .default
     )
+    
+    let cors = CORSMiddleware(
+            configuration: .init(
+                allowedOrigin: .originBased,
+                allowedMethods: [.GET, .POST, .OPTIONS],
+                allowedHeaders: [.accept, .authorization, .contentType, .origin]
+            )
+        )
+        app.middleware.use(cors)
 
     // ─────────────  ROUTES  ─────────────
     try routes(app)
