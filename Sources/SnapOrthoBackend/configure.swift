@@ -44,6 +44,9 @@ public func configure(_ app: Application) throws {
     app.migrations.add(CreateTodo())
     app.migrations.add(CreateDevice())
 
+    // ✅ Run migrations
+    try app.autoMigrate().wait()
+
     // ─────────────  Supabase Key  ─────────────
     guard let supaKey = Environment.get("SUPABASE_SERVICE_ROLE_KEY") else {
         throw Abort(.internalServerError)
@@ -60,7 +63,6 @@ public func configure(_ app: Application) throws {
         environment: .production
     )
 
-
     app.apns.containers.use(
         apnsConfig,
         eventLoopGroupProvider: .shared(app.eventLoopGroup),
@@ -68,15 +70,16 @@ public func configure(_ app: Application) throws {
         requestEncoder: JSONEncoder(),
         as: .default
     )
-    
+
+    // ─────────────  CORS  ─────────────
     let cors = CORSMiddleware(
-            configuration: .init(
-                allowedOrigin: .originBased,
-                allowedMethods: [.GET, .POST, .OPTIONS],
-                allowedHeaders: [.accept, .authorization, .contentType, .origin]
-            )
+        configuration: .init(
+            allowedOrigin: .originBased,
+            allowedMethods: [.GET, .POST, .OPTIONS],
+            allowedHeaders: [.accept, .authorization, .contentType, .origin]
         )
-        app.middleware.use(cors)
+    )
+    app.middleware.use(cors)
 
     // ─────────────  ROUTES  ─────────────
     try routes(app)

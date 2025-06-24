@@ -10,13 +10,13 @@ struct CreateDevice: Migration {
             .field("app_version", .string, .required)
             .field("last_seen", .datetime, .required)
 
-            // ✅ Notification-friendly additions
-            .field("language", .string)                         // e.g., "en", "es"
-            .field("timezone", .string)                         // e.g., "America/New_York"
-            .field("receive_notifications", .bool, .sql(.default(true)))  // opt-out logic
-            .field("last_notified", .datetime)                  // track most recent notification
-            .field("created_at", .datetime, .required)
-            .field("updated_at", .datetime, .required)
+            // Optional fields
+            .field("language", .string)
+            .field("timezone", .string)
+            .field("receive_notifications", .bool, .sql(.default(true)))
+            .field("last_notified", .datetime)
+            .field("created_at", .datetime)
+            .field("updated_at", .datetime)
 
             .unique(on: "device_token")
             .create()
