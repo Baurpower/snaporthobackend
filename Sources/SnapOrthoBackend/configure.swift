@@ -9,7 +9,9 @@ import APNSCore
 
 public func configure(_ app: Application) throws {
     app.http.server.configuration.hostname = "0.0.0.0"
+    app.logger.logLevel = .info
 
+    
     // ─────────────  ENV  ─────────────
     guard
         let host = Environment.get("DATABASE_HOST"),

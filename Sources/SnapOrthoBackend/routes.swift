@@ -80,49 +80,52 @@ func routes(_ app: Application) throws {
     }
 
     app.post("device", "register") { req async throws -> HTTPStatus in
-        let timestamp = Date().description
-        print("🔥 [\(timestamp)] /device/register HIT")
-        req.logger.info("🔥 /device/register HIT at \(timestamp)")
+        let timestamp = Date()
+        req.logger.info("🔥 /device/register HIT at \(timestamp.ISO8601Format())")
 
+        // Decode request payload
         let payload = try req.content.decode(RegisterDevicePayload.self)
+        req.logger.info("📦 token=\(payload.deviceToken.prefix(8))… platform=\(payload.platform) version=\(payload.appVersion)")
 
-        print("📦 Payload deviceToken: \(payload.deviceToken.prefix(10))..., platform: \(payload.platform), appVersion: \(payload.appVersion)")
-        req.logger.info("📦 deviceToken=\(payload.deviceToken.prefix(10))..., platform=\(payload.platform), version=\(payload.appVersion)")
-
-        // Optional: decode Supabase UID from JWT
+        // Determine user ID from JWT (if provided)
         let learnUserId: String
         if let authHeader = req.headers.bearerAuthorization {
             do {
                 learnUserId = try decodeSupabaseUID(from: authHeader.token)
-                print("🔑 Decoded Supabase UID: \(learnUserId)")
-                req.logger.info("🔑 Decoded Supabase UID: \(learnUserId)")
+                req.logger.info("🔑 Supabase UID decoded: \(learnUserId)")
             } catch {
-                print("❌ Failed to decode JWT")
-                req.logger.error("❌ JWT decode failed: \(error)")
+                req.logger.error("❌ Failed to decode JWT: \(error.localizedDescription)")
                 throw Abort(.unauthorized, reason: "Invalid token")
             }
         } else {
             learnUserId = "anonymous"
-            print("👤 No token provided. Using: anonymous")
-            req.logger.info("👤 No token → using anonymous")
+            req.logger.info("👤 No token found; defaulting to anonymous")
         }
 
         let now = Date()
 
+        // Check for existing device entry
         if let existing = try await Device.query(on: req.db)
             .filter(\.$deviceToken == payload.deviceToken)
             .first()
         {
-            print("♻️ Updating existing device: \(existing.id?.uuidString ?? "nil")")
-            req.logger.info("♻️ Updating existing device for user: \(learnUserId)")
+            req.logger.info("♻️ Updating existing device ID=\(existing.id?.uuidString ?? "nil") for user \(learnUserId)")
 
             existing.learnUserId = learnUserId
             existing.lastSeen = now
             existing.language = payload.language
             existing.timezone = payload.timezone
-            try await existing.update(on: req.db)
+
+            do {
+                try await existing.update(on: req.db)
+                req.logger.info("✅ Device updated successfully")
+            } catch {
+                req.logger.error("❌ Failed to update device: \(error.localizedDescription)")
+                throw Abort(.internalServerError, reason: "Failed to update device")
+            }
         } else {
-            print("🆕 Creating new device record...")
+            req.logger.info("🆕 Creating new device for user \(learnUserId)")
+
             let new = Device(
                 deviceToken: payload.deviceToken,
                 learnUserId: learnUserId,
@@ -134,11 +137,16 @@ func routes(_ app: Application) throws {
                 receiveNotifications: true,
                 lastNotified: nil
             )
-            try await new.create(on: req.db)
+
+            do {
+                try await new.create(on: req.db)
+                req.logger.info("✅ Device created successfully")
+            } catch {
+                req.logger.error("❌ Failed to create device: \(error.localizedDescription)")
+                throw Abort(.internalServerError, reason: "Failed to save device")
+            }
         }
 
-        print("✅ [\(timestamp)] Registered device for \(learnUserId)")
-        req.logger.info("✅ Registered device for \(learnUserId)")
         return .ok
     }
 
@@ -330,6 +338,21 @@ func routes(_ app: Application) throws {
 
             return .ok
         }
+    
+    app.get("debug", "insert-test-device") { req async throws -> String in
+        let now = Date()
+        let new = Device(
+            deviceToken: "manual-test-token",
+            learnUserId: "test-user",
+            platform: "iOS",
+            appVersion: "1.0",
+            lastSeen: now
+        )
+
+        try await new.create(on: req.db)
+        return "✅ Inserted test device"
+    }
+
 
 }
 
