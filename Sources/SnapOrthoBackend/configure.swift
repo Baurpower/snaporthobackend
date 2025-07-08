@@ -78,7 +78,7 @@ public func configure(_ app: Application) throws {
     // ─────────────  CORS  ─────────────
     let cors = CORSMiddleware(
         configuration: .init(
-            allowedOrigin: .originBased,
+            allowedOrigin: .custom("https://www.snap-ortho.com"),
             allowedMethods: [.GET, .POST, .OPTIONS],
             allowedHeaders: [.accept, .authorization, .contentType, .origin]
         )
