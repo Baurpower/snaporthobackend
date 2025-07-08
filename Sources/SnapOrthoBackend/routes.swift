@@ -341,10 +341,12 @@ func routes(_ app: Application) throws {
     
     
     //Bro logs
-    app.post("api", "log-caseprep") { req async throws -> HTTPStatus in
-        let log = try req.content.decode(CasePrepLog.self)
-        try await log.save(on: req.db)
-        return .ok
+    func routes(_ app: Application) throws {
+        app.post("case-prep-log") { req async throws -> HTTPStatus in
+            let log = try req.content.decode(CasePrepLog.self)
+            try await log.save(on: req.db)
+            return .created
+        }
     }
 }
 
