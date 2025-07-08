@@ -45,6 +45,8 @@ public func configure(_ app: Application) throws {
     // ─────────────  Migrations  ─────────────
     app.migrations.add(CreateTodo())
     app.migrations.add(CreateDevice())
+    app.migrations.add(CreateCasePrepLog())
+
 
     // ✅ Run migrations
     try app.autoMigrate().wait()
