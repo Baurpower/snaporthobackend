@@ -177,7 +177,7 @@ func routes(_ app: Application) throws {
     }
     
     app.get("send-test-push") { req async throws -> String in
-        let token = "bf848b3b4722372799f11dbe7dc1a465b11f1124c93f2fd79ab2b6270702316f694ef93e153328b91937a942be6c37fa1259ac652fb8214682122e6c784fecea"
+        let token = "7943f1aa1c5b717f67cac9956be0926cfc9190f5887b38afb032849576ecd711"
         
         let payload = TestPayload(acme1: "Hello", acme2: 2)
         
