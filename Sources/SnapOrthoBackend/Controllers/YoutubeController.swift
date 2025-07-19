@@ -16,6 +16,14 @@ struct YoutubeController: RouteCollection {
             youtubeURL: "https://youtu.be/nSqiWf5Z-B0",
             category: "Trauma",
             isPreview: true
+        ),
+        .init(
+            id: "it-fractures",
+            title: "Intertrochanteric (IT) Hip Fractures",
+            description: "Classification and operative treatment pearls for IT fractures.",
+            youtubeURL: "https://youtu.be/m5-ioOLLcp8?si=LU_drrVnpvKBWAqz",
+            category: "Trauma",
+            isPreview: true
         )
     ]
 
