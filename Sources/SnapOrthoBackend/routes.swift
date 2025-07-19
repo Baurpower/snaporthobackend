@@ -184,7 +184,7 @@ func routes(_ app: Application) throws {
         let notification = APNSAlertNotification(
             alert: .init(
                 title: .raw("New Learn Sketch!"),
-                subtitle: .raw("Watch our latest video on IT fractures- Out now")
+                subtitle: .raw("Out Now - IT hip fractures")
             ),
             expiration: .immediately,
             priority: .immediately,
