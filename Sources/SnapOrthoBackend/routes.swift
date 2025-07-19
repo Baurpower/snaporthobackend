@@ -177,14 +177,14 @@ func routes(_ app: Application) throws {
     }
     
     app.get("send-test-push") { req async throws -> String in
-        let token = "bf848b3b4722372799f11dbe7dc1a465b11f1124c93f2fd79ab2b6270702316f"
+        let token = "bf848b3b4722372799f11dbe7dc1a465b11f1124c93f2fd79ab2b6270702316f694ef93e153328b91937a942be6c37fa1259ac652fb8214682122e6c784fecea"
         
         let payload = TestPayload(acme1: "Hello", acme2: 2)
         
         let notification = APNSAlertNotification(
             alert: .init(
-                title: .raw("SnapOrtho"),
-                subtitle: .raw("Your test push worked 🚀")
+                title: .raw("New Learn Sketch!"),
+                subtitle: .raw("Watch our latest video on IT fractures- Out now")
             ),
             expiration: .immediately,
             priority: .immediately,
@@ -258,12 +258,12 @@ func routes(_ app: Application) throws {
                 let message: String
             }
             
-            let payload = BroadcastPayload(message: "Time to sharpen your skills!")
+            let payload = BroadcastPayload(message: "New Learn Sketch!")
             
             let notification = APNSAlertNotification(
                 alert: .init(
-                    title: .raw("Ready for ortho rotations?"),
-                    subtitle: .raw("Sharpen your fracture conference skills in Practice 🦴📊")
+                    title: .raw("Our 2nd Learn Video just dropped on IT Fxs"),
+                    subtitle: .raw("Head to the learn section to check it out!")
                 ),
                 expiration: .immediately,
                 priority: .immediately,
