@@ -24,6 +24,14 @@ struct YoutubeController: RouteCollection {
             youtubeURL: "https://youtu.be/m5-ioOLLcp8?si=LU_drrVnpvKBWAqz",
             category: "Trauma",
             isPreview: true
+        ),
+        .init(
+            id: "open-fractures",
+            title: "Open Fractures",
+            description: "Classification and operative treatment pearls for open fractures.",
+            youtubeURL: "https://youtu.be/lmonzQ08tjA?si=ufckVR0aBjk5iG7",
+            category: "Trauma",
+            isPreview: true
         )
     ]
 
