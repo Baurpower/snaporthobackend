@@ -32,6 +32,14 @@ struct YoutubeController: RouteCollection {
             youtubeURL: "https://youtu.be/lmonzQ08tjA?si=ufckVR0aBjk5iG7",
             category: "Trauma",
             isPreview: true
+        ),
+        .init(
+            id: "tlics",
+            title: "Thoracolumbar Injury Classification and Severity Scale",
+            description: "Classification and treatment for thoracolumbar spine injuries based on morphology, neurologic status, and PLC integrity.",
+            youtubeURL: "https://youtu.be/AgFEs0Cl-H0",
+            category: "Trauma",
+            isPreview: true
         )
     ]
 
