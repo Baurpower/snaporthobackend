@@ -40,6 +40,14 @@ struct YoutubeController: RouteCollection {
             youtubeURL: "https://youtu.be/AgFEs0Cl-H0",
             category: "Trauma",
             isPreview: true
+        ),
+        .init(
+            id: "vancouver",
+            title: "Vancouver Classification Periprosthetic Hip Fractures",
+            description: "Classification and treatment for periprosthetic hip fractures.",
+            youtubeURL: "https://youtu.be/zmVSJGWz00s?si=WG-IJJVnbUEXBx49",
+            category: "Trauma",
+            isPreview: true
         )
     ]
 
