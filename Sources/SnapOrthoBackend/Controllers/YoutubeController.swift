@@ -48,6 +48,14 @@ struct YoutubeController: RouteCollection {
             youtubeURL: "https://youtu.be/zmVSJGWz00s?si=WG-IJJVnbUEXBx49",
             category: "Trauma",
             isPreview: true
+        ),
+        .init(
+            id: "fem-neck",
+            title: "Garden Classification Femoral Neck Fractures",
+            description: "Classification and treatment for femoral neck fractures.",
+            youtubeURL: "https://youtu.be/90CBybS-CLk?si=HzhWtbEG63Qiyo3R",
+            category: "Trauma",
+            isPreview: true
         )
     ]
 
