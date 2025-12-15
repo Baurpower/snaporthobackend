@@ -56,6 +56,14 @@ struct YoutubeController: RouteCollection {
             youtubeURL: "https://youtu.be/90CBybS-CLk?si=HzhWtbEG63Qiyo3R",
             category: "Trauma",
             isPreview: true
+        ),
+        .init(
+            id: "distal-clav",
+            title: "Neer Classification Distal Clavicle Fractures",
+            description: "Classification and treatment for distal clavicle fractures.",
+            youtubeURL: "https://youtu.be/DRzfrEfTUC0?si=CcRVPU_ncWkTaVbx",
+            category: "Trauma",
+            isPreview: true
         )
     ]
 
