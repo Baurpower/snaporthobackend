@@ -21,7 +21,7 @@ struct YoutubeController: RouteCollection {
             id: "it-fractures",
             title: "Intertrochanteric (IT) Hip Fractures",
             description: "Classification and operative treatment pearls for IT fractures.",
-            youtubeURL: "https://youtu.be/m5-ioOLLcp8?si=LU_drrVnpvKBWAqz",
+            youtubeURL: "https://youtu.be/m5-ioOLLcp8",
             category: "Trauma",
             isPreview: true
         ),
@@ -29,7 +29,7 @@ struct YoutubeController: RouteCollection {
             id: "open-fractures",
             title: "Open Fractures",
             description: "Classification and operative treatment pearls for open fractures.",
-            youtubeURL: "https://youtu.be/lmonzQ08tjA?si=ufckVR0aBjk5iG7",
+            youtubeURL: "https://youtu.be/lmonzQ08tjA",
             category: "Trauma",
             isPreview: true
         ),
@@ -45,25 +45,25 @@ struct YoutubeController: RouteCollection {
             id: "vancouver",
             title: "Vancouver Classification Periprosthetic Hip Fractures",
             description: "Classification and treatment for periprosthetic hip fractures.",
-            youtubeURL: "https://youtu.be/zmVSJGWz00s?si=WG-IJJVnbUEXBx49",
+            youtubeURL: "https://youtu.be/zmVSJGWz00s",
             category: "Trauma",
-            isPreview: true
+            isPreview: false
         ),
         .init(
             id: "fem-neck",
             title: "Garden Classification Femoral Neck Fractures",
             description: "Classification and treatment for femoral neck fractures.",
-            youtubeURL: "https://youtu.be/90CBybS-CLk?si=HzhWtbEG63Qiyo3R",
+            youtubeURL: "https://youtu.be/90CBybS-CLk",
             category: "Trauma",
-            isPreview: true
+            isPreview: false
         ),
         .init(
             id: "distal-clav",
             title: "Neer Classification Distal Clavicle Fractures",
             description: "Classification and treatment for distal clavicle fractures.",
-            youtubeURL: "https://youtu.be/DRzfrEfTUC0?si=CcRVPU_ncWkTaVbx",
+            youtubeURL: "https://youtu.be/DRzfrEfTUC0",
             category: "Trauma",
-            isPreview: true
+            isPreview: false
         )
     ]
 
