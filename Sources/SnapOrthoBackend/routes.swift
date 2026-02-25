@@ -315,38 +315,162 @@ func routes(_ app: Application) throws {
         try await crawler.fetchAll(on: req)
     }
     
-    app.post("log-donation") { req async throws -> HTTPStatus in
-        struct Donation: Content {
-            let name: String
-            let email: String
-            let message: String?
-            let amount: Int
-            let stripe_id: String
+    
+    
+    app.post("stripe-webhook") { req async throws -> HTTPStatus in
+        guard let secret = Environment.get("STRIPE_WEBHOOK_SECRET"), !secret.isEmpty else {
+            req.logger.critical("Missing STRIPE_WEBHOOK_SECRET")
+            throw Abort(.internalServerError)
         }
-        
-        let donation = try req.content.decode(Donation.self)
-        
-        try await (req.db as! PostgresDatabase).sql().raw("""
-                INSERT INTO donations (name, email, message, amount, stripe_id, status)
-                VALUES (\(bind: donation.name),
-                        \(bind: donation.email),
-                        \(bind: donation.message ?? ""),
-                        \(bind: donation.amount),
-                        \(bind: donation.stripe_id),
-                        'paid')
-            """).run()
-        
+
+        let rawBody = req.body.data ?? ByteBuffer()
+
+        guard let sigHeader = req.headers.first(name: "Stripe-Signature") else {
+            throw Abort(.badRequest, reason: "Missing Stripe-Signature header.")
+        }
+
+        try StripeWebhook.verifySignature(payload: rawBody, signatureHeader: sigHeader, secret: secret)
+
+        let event = try StripeWebhook.decodeEvent(from: rawBody)
+
+        guard event.type == "payment_intent.succeeded" else { return .ok }
+
+        let pi = event.data.object
+        if let status = pi.status, status != "succeeded" { return .ok }
+
+        let md = pi.metadata ?? [:]
+        let billing = (md["billing_name"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let display = (md["display_name"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let anonStr = (md["anonymous"] ?? "false").lowercased()
+        let anonymous = (anonStr == "true" || anonStr == "1" || anonStr == "yes")
+        let email = (md["email"] ?? pi.receipt_email ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let msg = (md["message"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !email.isEmpty else {
+            req.logger.warning("Webhook PI \(pi.id) missing email; skipping insert.")
+            return .ok
+        }
+
+        try await (req.db as! any PostgresDatabase).sql().raw("""
+            INSERT INTO donations
+                (billing_name, display_name, anonymous, email, message, amount, stripe_id, status)
+            VALUES
+                (\(bind: billing),
+                 \(bind: display),
+                 \(bind: anonymous),
+                 \(bind: email),
+                 \(bind: msg),
+                 \(bind: pi.amount),
+                 \(bind: pi.id),
+                 'paid')
+            ON CONFLICT (stripe_id) DO NOTHING
+        """).run()
+
         return .ok
     }
     
+    // ───────── Donations API (for website) ─────────
+
+    struct DonationDTO: Content {
+        let name: String
+        let amount: Int           // dollars for UI
+        let dateISO: String
+        let via: String
+        let note: String?
+    }
+
+    struct DonationTotalsDTO: Content {
+        let sumCents: Int
+        let sumDollars: Int
+        let count: Int
+    }
+
+    struct DonationsResponseDTO: Content {
+        let source: String
+        let donations: [DonationDTO]
+        let totals: DonationTotalsDTO
+    }
+
+    app.get("donations") { req async throws -> DonationsResponseDTO in
+        // limit=80 default, clamp to 1...200
+        let limit = min(max((try? req.query.get(Int.self, at: "limit")) ?? 80, 1), 200)
+
+        req.logger.info("📥 GET /donations limit=\(limit)")
+
+        // Make sure we're on Postgres
+        let sql = (req.db as! any PostgresDatabase).sql()
+
+        // 1) Totals
+        let totalsRow = try await sql.raw("""
+            SELECT
+              COALESCE(SUM(amount), 0)::bigint AS sum_cents,
+              COUNT(*)::bigint AS count
+            FROM donations
+            WHERE status = 'paid'
+        """).first()
+
+        let sumCents = Int((try? totalsRow?.decode(column: "sum_cents", as: Int64.self)) ?? 0)
+        let count = Int((try? totalsRow?.decode(column: "count", as: Int64.self)) ?? 0)
+
+        // 2) Recent list
+        let rows = try await sql.raw("""
+            SELECT
+              display_name,
+              anonymous,
+              message,
+              amount,
+              created_at
+            FROM donations
+            WHERE status = 'paid'
+            ORDER BY created_at DESC NULLS LAST
+            LIMIT \(bind: limit)
+        """).all()
+
+        let donations: [DonationDTO] = rows.map { row in
+            let display = ((try? row.decode(column: "display_name", as: String?.self)) ?? nil)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+            let anonymous = (try? row.decode(column: "anonymous", as: Bool?.self)) ?? nil
+            let message = ((try? row.decode(column: "message", as: String?.self)) ?? nil)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            let amountCents64 = (try? row.decode(column: "amount", as: Int64.self)) ?? 0
+            let amountDollars = Int((amountCents64 + 50) / 100) // rounded dollars
+
+            let createdAt = (try? row.decode(column: "created_at", as: Date?.self)) ?? nil
+            let dateISO = createdAt?.ISO8601Format() ?? ""
+
+            let isAnon = (anonymous ?? false) || display.isEmpty
+            let name = isAnon ? "" : display
+
+            return DonationDTO(
+                name: name,
+                amount: amountDollars,
+                dateISO: dateISO,
+                via: "Stripe",
+                note: (message?.isEmpty == false) ? message : nil
+            )
+        }
+
+        return DonationsResponseDTO(
+            source: "db:donations",
+            donations: donations,
+            totals: DonationTotalsDTO(
+                sumCents: sumCents,
+                sumDollars: Int((Int64(sumCents) + 50) / 100),
+                count: count
+            )
+        )
+    }
     
     //Bro logs
     app.post("case-prep-log") { req async throws -> HTTPStatus in
-            let log = try req.content.decode(CasePrepLog.self)
-            try await log.save(on: req.db)
-            return .created
-        }
+        let log = try req.content.decode(CasePrepLog.self)
+        try await log.save(on: req.db)
+        return .created
     }
+}
+
 
 
 
