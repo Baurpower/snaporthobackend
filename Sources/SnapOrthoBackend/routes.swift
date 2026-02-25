@@ -440,8 +440,7 @@ func routes(_ app: Application) throws {
             let createdAt = (try? row.decode(column: "created_at", as: Date?.self)) ?? nil
             let dateISO = createdAt?.ISO8601Format() ?? ""
 
-            let isAnon = (anonymous ?? false) || display.isEmpty
-            let name = isAnon ? "" : display
+            let name = display
 
             return DonationDTO(
                 name: name,
