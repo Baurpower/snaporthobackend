@@ -315,7 +315,22 @@ func routes(_ app: Application) throws {
         try await crawler.fetchAll(on: req)
     }
     
-    
+    struct BrobotAvgTimeResponse: Content {
+        let avgMs: Int
+    }
+
+    app.get("brobot", "avg-time") { req async throws -> BrobotAvgTimeResponse in
+        // fallback if env var missing or invalid
+        let fallback = 3000
+
+        let raw = Environment.get("BROBOT_AVG_MS")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let ms = Int(raw) ?? fallback
+
+        // optional guardrails so you don't accidentally set something insane
+        let clamped = min(max(ms, 500), 120_000)
+
+        return BrobotAvgTimeResponse(avgMs: clamped)
+    }
     
     app.post("stripe-webhook") { req async throws -> HTTPStatus in
         guard let secret = Environment.get("STRIPE_WEBHOOK_SECRET"), !secret.isEmpty else {
