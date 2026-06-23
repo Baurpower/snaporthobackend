@@ -92,9 +92,8 @@ struct NotificationService: Sendable {
             .filter(\.$invalidatedAt == .null)
             .all()
 
-        return try await dispatch(
+        return try await dispatchRespectingPreferences(
             to: devices,
-            userId: nil,
             category: category,
             notificationType: notificationType,
             title: title, body: body, deeplink: deeplink,
@@ -165,13 +164,100 @@ struct NotificationService: Sendable {
             .filter(\.$lastSeenAt < cutoff)
             .all()
 
-        return try await dispatch(
+        return try await dispatchRespectingPreferences(
             to: devices,
-            userId: nil,
             category: category,
             notificationType: notificationType,
             title: title, body: body, deeplink: deeplink,
             metadata: metadata, db: db
+        )
+    }
+
+    // MARK: - Preference-aware batch dispatch (used by broadcast paths)
+
+    /// Splits a device list by per-user category preference before sending.
+    /// Devices with no `userId` (anonymous registrations) are always included —
+    /// anonymous devices have no preference row to check against.
+    private func dispatchRespectingPreferences(
+        to devices: [UserDeviceToken],
+        category: NotificationCategory,
+        notificationType: String,
+        title: String,
+        body: String,
+        deeplink: String?,
+        metadata: [String: String],
+        db: any Database
+    ) async throws -> NotificationBroadcastResult {
+        guard !category.bypassesFrequencyCap else {
+            // system bypasses all preference checks
+            return try await dispatch(
+                to: devices, userId: nil, category: category,
+                notificationType: notificationType, title: title, body: body,
+                deeplink: deeplink, metadata: metadata, db: db
+            )
+        }
+
+        let userIds = Set(devices.compactMap { $0.userId })
+        var disabledUserIds: Set<UUID> = []
+        if !userIds.isEmpty {
+            let disabledPrefs = try await NotificationPreference.query(on: db)
+                .filter(\.$userId ~~ Array(userIds))
+                .filter(\.$category == category.rawValue)
+                .filter(\.$enabled == false)
+                .all()
+            disabledUserIds = Set(disabledPrefs.map { $0.userId })
+        }
+
+        // Devices whose user explicitly disabled this category, or whose category
+        // defaults to disabled and has no preference row yet (e.g. product/marketing).
+        var sendable: [UserDeviceToken] = []
+        var blocked: [UserDeviceToken] = []
+        let usersWithPref = Set(try await NotificationPreference.query(on: db)
+            .filter(\.$userId ~~ Array(userIds))
+            .filter(\.$category == category.rawValue)
+            .all()
+            .map { $0.userId })
+
+        for device in devices {
+            guard let uid = device.userId else {
+                sendable.append(device) // anonymous device — no preference to check
+                continue
+            }
+            if disabledUserIds.contains(uid) {
+                blocked.append(device)
+            } else if !usersWithPref.contains(uid) && !category.defaultEnabled {
+                // No preference row yet and this category defaults to opt-in (e.g. product)
+                blocked.append(device)
+            } else {
+                sendable.append(device)
+            }
+        }
+
+        for device in blocked {
+            try await logAttempt(
+                userId: device.userId,
+                deviceTokenId: device.id,
+                category: category,
+                notificationType: notificationType,
+                title: title, body: body, deeplink: deeplink,
+                metadata: metadata,
+                status: .skipped,
+                skipReason: "category_disabled",
+                db: db
+            )
+        }
+
+        let result = try await dispatch(
+            to: sendable, userId: nil, category: category,
+            notificationType: notificationType, title: title, body: body,
+            deeplink: deeplink, metadata: metadata, db: db
+        )
+
+        return NotificationBroadcastResult(
+            sent: result.sent,
+            failed: result.failed,
+            skipped: result.skipped + blocked.count,
+            total: result.total + blocked.count
         )
     }
 

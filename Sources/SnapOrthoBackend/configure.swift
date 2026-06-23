@@ -66,6 +66,19 @@ public func configure(_ app: Application) throws {
                 throw error
             }
         }
+    } else if app.environment == .production {
+        app.logger.critical("❌ SUPABASE_DATABASE_URL is required in production")
+        throw Abort(.internalServerError)
+    } else if app.environment == .testing {
+        // Fallback for local/CI testing without a separate Supabase project:
+        // reuse the Amazon RDS connection so notification migrations/models still work.
+        app.databases.use(
+            .postgres(configuration: postgresConfig, maxConnectionsPerEventLoop: 2, connectionPoolTimeout: .seconds(20)),
+            as: .notifications
+        )
+        app.logger.warning("⚠️ SUPABASE_DATABASE_URL not set — using Amazon RDS for .notifications in test mode")
+    } else {
+        app.logger.warning("⚠️ SUPABASE_DATABASE_URL not set — Supabase notification features disabled in development")
     }
 
     // ─────────────  Amazon RDS Migrations  ─────────────
@@ -79,6 +92,12 @@ public func configure(_ app: Application) throws {
     app.migrations.add(CreateUserDeviceTokens(), to: .notifications)
     app.migrations.add(CreateNotificationPreferences(), to: .notifications)
     app.migrations.add(CreateNotificationDeliveryAttempts(), to: .notifications)
+
+    // ─────────────  Phase 2A: Candidate/Scheduler Foundation  ─────────────
+    app.migrations.add(CreateNotificationCandidates(), to: .notifications)
+    app.migrations.add(CreateNotificationTemplates(), to: .notifications)
+    app.migrations.add(CreateNotificationInteractions(), to: .notifications)
+    app.migrations.add(CreateNotificationUserState(), to: .notifications)
 
     try app.autoMigrate().wait()
 
@@ -152,6 +171,12 @@ public func configure(_ app: Application) throws {
 
     // ─────────────  Custom Commands  ─────────────
     app.asyncCommands.use(BackfillNotificationTokensCommand(), as: BackfillNotificationTokensCommand.name)
+
+    // ─────────────  Phase 2A: Candidate Scheduler  ─────────────
+    // No-op generation/dispatch in Phase 2A — only validates the recurring loop itself
+    // (counts pending candidates, rolls over daily/weekly send counters). Phase 2B+ adds
+    // real candidate generation and dispatch on top of this same job.
+    app.lifecycle.use(CandidateSchedulerJob())
 
     // ─────────────  CORS  ─────────────
     let cors = CORSMiddleware(configuration: .init(

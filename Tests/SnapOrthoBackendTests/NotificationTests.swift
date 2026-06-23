@@ -307,6 +307,85 @@ struct NotificationTests {
         #expect(NotificationCategory.system.defaultEnabled == true)
     }
 
+    @Test("Broadcast respects product-disabled-by-default for users with no preference row")
+    func broadcastSkipsProductForUsersWithNoPreference() async throws {
+        try await withApp { app in
+            let userId = UUID()
+            let token = "broadcast-pref-token-\(UUID().uuidString)"
+            let device = UserDeviceToken(userId: userId, token: token, platform: "ios", environment: "production")
+            try await device.create(on: app.db(.notifications))
+            // No NotificationPreference row exists for this user/category — product defaults to disabled
+
+            let svc = app.notificationService
+            let result = try await svc.broadcast(
+                category: .product,
+                notificationType: "product.announcement",
+                title: "Test",
+                body: "Test",
+                deeplink: nil,
+                db: app.db(.notifications)
+            )
+
+            #expect(result.sent == 0)
+            #expect(result.skipped == 1)
+            #expect(mockAPNS.calls.isEmpty)
+
+            let attempts = try await NotificationDeliveryAttempt.query(on: app.db(.notifications))
+                .filter(\.$userId == userId)
+                .all()
+            #expect(attempts.first?.status == .skipped)
+            #expect(attempts.first?.errorCode == "category_disabled")
+        }
+    }
+
+    @Test("Broadcast sends product notifications to users who explicitly opted in")
+    func broadcastSendsProductForOptedInUsers() async throws {
+        try await withApp { app in
+            let userId = UUID()
+            let token = "broadcast-optin-token-\(UUID().uuidString)"
+            let device = UserDeviceToken(userId: userId, token: token, platform: "ios", environment: "production")
+            try await device.create(on: app.db(.notifications))
+
+            let pref = NotificationPreference(userId: userId, category: .product, enabled: true)
+            try await pref.create(on: app.db(.notifications))
+
+            let svc = app.notificationService
+            let result = try await svc.broadcast(
+                category: .product,
+                notificationType: "product.announcement",
+                title: "Test",
+                body: "Test",
+                deeplink: nil,
+                db: app.db(.notifications)
+            )
+
+            #expect(result.sent == 1)
+            #expect(result.skipped == 0)
+        }
+    }
+
+    @Test("Broadcast always sends anonymous devices regardless of category default")
+    func broadcastSendsAnonymousDevicesForProduct() async throws {
+        try await withApp { app in
+            let token = "broadcast-anon-token-\(UUID().uuidString)"
+            let device = UserDeviceToken(userId: nil, token: token, platform: "ios", environment: "production")
+            try await device.create(on: app.db(.notifications))
+
+            let svc = app.notificationService
+            let result = try await svc.broadcast(
+                category: .product,
+                notificationType: "product.announcement",
+                title: "Test",
+                body: "Test",
+                deeplink: nil,
+                db: app.db(.notifications)
+            )
+
+            // Anonymous devices have no user_id, so there's no preference row to check
+            #expect(result.sent == 1)
+        }
+    }
+
     // MARK: - Admin test send logging
 
     @Test("sendToDevice creates delivery attempt with matching notification_id")

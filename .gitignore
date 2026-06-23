@@ -9,3 +9,8 @@ db.sqlite
 .env
 .env.*
 !.env.examplebuild/
+
+.env
+.env.local
+.env.production
+.env.development
