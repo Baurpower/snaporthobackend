@@ -1,6 +1,7 @@
 import Vapor
 import JWTKit
 import Foundation
+import Supabase
 
 // MARK: - Payload
 
