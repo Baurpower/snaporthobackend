@@ -1,5 +1,6 @@
 import Vapor
 import JWTKit
+import Foundation
 
 // MARK: - Payload
 
