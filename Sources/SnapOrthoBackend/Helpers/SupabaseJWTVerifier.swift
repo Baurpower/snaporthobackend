@@ -6,7 +6,6 @@ import FoundationNetworking
 
 import Vapor
 import JWTKit
-import Supabase
 
 // MARK: - Payload
 
@@ -41,67 +40,90 @@ final class SupabaseJWKSVerifier: SupabaseAuthVerifying, @unchecked Sendable {
     }
 
     static func load(supabaseURL: URL, logger: Logger, client: any Client) async throws -> SupabaseJWKSVerifier {
-        let jwksURL = supabaseURL
-            .appendingPathComponent("auth/v1/.well-known/jwks.json")
+        let jwksURL = supabaseURL.appendingPathComponent("auth/v1/.well-known/jwks.json")
         let response = try await client.get(URI(string: jwksURL.absoluteString))
+
         guard response.status == .ok, var body = response.body else {
             throw Abort(.internalServerError, reason: "Failed to fetch Supabase JWKS (status=\(response.status))")
         }
+
         guard let jwksJSON = body.readString(length: body.readableBytes) else {
             throw Abort(.internalServerError, reason: "Supabase JWKS response was empty")
         }
+
         logger.info("✅ Supabase JWKS loaded for JWT verification")
         return try await build(jwksJSON: jwksJSON, supabaseURL: supabaseURL)
     }
 
-    /// Synchronous JWKS load for `configure()` — uses URLSession, safe for startup.
+    /// Synchronous JWKS load for configure().
+    /// Uses a Sendable box to satisfy Swift 6 concurrency checks on Linux.
     static func loadBlocking(supabaseURL: URL, logger: Logger) throws -> SupabaseJWKSVerifier {
-        let jwksURL = supabaseURL
-            .appendingPathComponent("auth/v1/.well-known/jwks.json")
+        let jwksURL = supabaseURL.appendingPathComponent("auth/v1/.well-known/jwks.json")
         let sem = DispatchSemaphore(value: 0)
-        var jwksJSON: String?
-        var fetchError: (any Error)?
+
+        final class FetchBox: @unchecked Sendable {
+            var jwksJSON: String?
+            var error: (any Error)?
+        }
+
+        let box = FetchBox()
 
         URLSession.shared.dataTask(with: jwksURL) { data, _, error in
             defer { sem.signal() }
+
             if let error {
-                fetchError = error
+                box.error = error
                 return
             }
-            guard let data, let json = String(data: data, encoding: .utf8) else {
-                fetchError = Abort(.internalServerError, reason: "Supabase JWKS response was empty")
+
+            guard let data,
+                  let json = String(data: data, encoding: .utf8)
+            else {
+                box.error = Abort(.internalServerError, reason: "Supabase JWKS response was empty")
                 return
             }
-            jwksJSON = json
+
+            box.jwksJSON = json
         }.resume()
+
         sem.wait()
 
-        if let fetchError { throw fetchError }
-        guard let jwksJSON else {
+        if let error = box.error {
+            throw error
+        }
+
+        guard let jwksJSON = box.jwksJSON else {
             throw Abort(.internalServerError, reason: "Failed to fetch Supabase JWKS")
         }
 
         let keySem = DispatchSemaphore(value: 0)
+
         final class LoadBox: @unchecked Sendable {
             var verifier: SupabaseJWKSVerifier?
             var error: (any Error)?
         }
-        let box = LoadBox()
+
+        let loadBox = LoadBox()
 
         Task {
             do {
-                box.verifier = try await build(jwksJSON: jwksJSON, supabaseURL: supabaseURL)
+                loadBox.verifier = try await build(jwksJSON: jwksJSON, supabaseURL: supabaseURL)
             } catch {
-                box.error = error
+                loadBox.error = error
             }
             keySem.signal()
         }
+
         keySem.wait()
 
-        if let error = box.error { throw error }
-        guard let verifier = box.verifier else {
+        if let error = loadBox.error {
+            throw error
+        }
+
+        guard let verifier = loadBox.verifier else {
             throw Abort(.internalServerError, reason: "Failed to initialize Supabase JWKS verifier")
         }
+
         logger.info("✅ Supabase JWKS loaded for JWT verification")
         return verifier
     }
@@ -109,7 +131,9 @@ final class SupabaseJWKSVerifier: SupabaseAuthVerifying, @unchecked Sendable {
     private static func build(jwksJSON: String, supabaseURL: URL) async throws -> SupabaseJWKSVerifier {
         let keys = JWTKeyCollection()
         try await keys.add(jwksJSON: jwksJSON)
+
         let issuer = supabaseURL.appendingPathComponent("auth/v1").absoluteString
+
         return SupabaseJWKSVerifier(
             keys: keys,
             expectedIssuer: issuer,
@@ -128,6 +152,7 @@ final class SupabaseJWKSVerifier: SupabaseAuthVerifying, @unchecked Sendable {
         guard let uuid = UUID(uuidString: payload.sub.value) else {
             throw Abort(.unauthorized, reason: "JWT sub is not a valid UUID")
         }
+
         return uuid
     }
 }
@@ -147,17 +172,25 @@ final class SupabaseAPIJWTVerifier: SupabaseAuthVerifying, @unchecked Sendable {
 
     func verifiedUserId(from jwt: String) async throws -> UUID {
         let userURL = supabaseURL.appendingPathComponent("auth/v1/user")
+
         let response = try await client.get(URI(string: userURL.absoluteString)) { req in
             req.headers.bearerAuthorization = .init(token: jwt)
         }
+
         guard response.status == .ok else {
             throw Abort(.unauthorized, reason: "Invalid or expired token")
         }
-        struct SupabaseUser: Decodable { let id: String }
+
+        struct SupabaseUser: Decodable {
+            let id: String
+        }
+
         let user = try response.content.decode(SupabaseUser.self)
+
         guard let uuid = UUID(uuidString: user.id) else {
             throw Abort(.unauthorized, reason: "Supabase user id is not a valid UUID")
         }
+
         return uuid
     }
 }
@@ -176,11 +209,14 @@ extension Application {
             }
             return verifier
         }
-        set { storage[SupabaseJWTVerifierStorageKey.self] = newValue }
+        set {
+            storage[SupabaseJWTVerifierStorageKey.self] = newValue
+        }
     }
 
     func configureSupabaseJWTVerifier() throws {
         let supabaseURLString = Environment.get("SUPABASE_URL") ?? "https://geznczcokbgybsseipjg.supabase.co"
+
         guard let supabaseURL = URL(string: supabaseURLString) else {
             logger.critical("❌ SUPABASE_URL is not a valid URL: \(supabaseURLString)")
             throw Abort(.internalServerError)
@@ -194,7 +230,9 @@ extension Application {
                 logger.critical("❌ Failed to load Supabase JWKS in production: \(error)")
                 throw error
             }
+
             logger.warning("⚠️ JWKS load failed — falling back to Supabase API JWT verification: \(error)")
+
             storage[SupabaseJWTVerifierStorageKey.self] = SupabaseAPIJWTVerifier(
                 supabaseURL: supabaseURL,
                 client: client,
@@ -211,12 +249,16 @@ extension Request {
         guard let bearer = headers.bearerAuthorization?.token else {
             throw Abort(.unauthorized, reason: "Bearer token required")
         }
+
         return try await application.supabaseJWTVerifier.verifiedUserId(from: bearer)
     }
 
     /// Returns the verified user ID when a valid JWT is present; nil for anonymous requests.
     func optionalVerifiedSupabaseUserId() async -> UUID? {
-        guard let bearer = headers.bearerAuthorization?.token else { return nil }
+        guard let bearer = headers.bearerAuthorization?.token else {
+            return nil
+        }
+
         return try? await application.supabaseJWTVerifier.verifiedUserId(from: bearer)
     }
 }
