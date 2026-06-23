@@ -20,6 +20,7 @@ let package = Package(
                     from: "2.0.0"
                 ),
         .package(url: "https://github.com/vapor/apns.git",   from: "4.2.0"),
+        .package(url: "https://github.com/vapor/jwt-kit.git", from: "5.0.0"),
         .package(url: "https://github.com/soto-project/soto", from: "7.7.0"),
         .package(url: "https://github.com/CoreOffice/XMLCoder", from: "0.17.1")
 
@@ -41,6 +42,7 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "Supabase", package: "supabase-swift"),
                 .product(name: "VaporAPNS", package: "apns"),
+                .product(name: "JWTKit", package: "jwt-kit"),
                 .product(name: "SotoS3", package: "soto"),
                 .product(name: "XMLCoder", package: "XMLCoder")
 

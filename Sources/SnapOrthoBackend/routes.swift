@@ -17,47 +17,44 @@ extension Application {
 
 // MARK: – Main routes
 func routes(_ app: Application) throws {
-    
-    // Sanity log
-    print("SERVICE ROLE KEY PREFIX:",
-          Environment.get("SUPABASE_SERVICE_ROLE_KEY")?.prefix(10) ?? "MISSING")
-    
+
+    // Sanity log — only prefix, never the full key
+    let keyPrefix = Environment.get("SUPABASE_SERVICE_ROLE_KEY")?.prefix(10) ?? "MISSING"
+    app.logger.info("SERVICE ROLE KEY PREFIX: \(keyPrefix)")
+
     // ───────── 1. Basic public routes ─────────
     app.get { _ async in "SnapOrtho Backend is live!" }
     app.get("hello") { _ async -> String in "Hello, world!" }
-    
-    // Register your other controllers
+
     try app.register(collection: TodoController())
     try app.register(collection: YoutubeController())
-    
-    // Supabase constants
-    let supabaseURL  = URL(string: "https://geznczcokbgybsseipjg.supabase.co")!
-    let serviceKey   = Environment.get("SUPABASE_SERVICE_ROLE_KEY")!
-    
+
+    let supabaseURL = URL(string: "https://geznczcokbgybsseipjg.supabase.co")!
+    let serviceKey  = Environment.get("SUPABASE_SERVICE_ROLE_KEY")!
+
     // ───────── 2. /auth/confirm (OTP redirect) ─────────
     app.get("auth", "confirm") { req async throws -> Response in
         guard
             let tokenHash: String = try? req.query.get(String.self, at: "token_hash"),
-            let type: String = try? req.query.get(String.self, at: "type")
+            let type: String      = try? req.query.get(String.self, at: "type")
         else {
             throw Abort(.badRequest, reason: "Missing token_hash or type")
         }
-        
+
         let redirectPath = (try? req.query.get(String.self, at: "next")) ?? "/"
         req.logger.info("🔑 /auth/confirm → \(tokenHash.prefix(10))…, type=\(type)")
-        
+
         struct OTPPayload: Content {
             let type: String
             let token: String
         }
-        
+
         let verifyURI = URI(string: "\(supabaseURL)/auth/v1/verify")
-        
         let resp = try await req.client.post(verifyURI) { post in
             try post.content.encode(OTPPayload(type: type, token: tokenHash))
             post.headers.bearerAuthorization = .init(token: serviceKey)
         }
-        
+
         if resp.status == .ok {
             req.logger.info("✅ OTP verified")
             return req.redirect(to: redirectPath)
@@ -66,101 +63,128 @@ func routes(_ app: Application) throws {
             return req.redirect(to: "/auth/auth-code-error")
         }
     }
-    
-    // ───────── 3. /device/register ─────────
+
+    // ───────── 3. POST /device/register (dual-write) ─────────
+    //
+    // Phase 1 dual-write:
+    //   1. Write to Amazon RDS `devices` (backward compat — existing app behavior)
+    //   2. Write to Supabase `user_device_tokens` (new source of truth for notifications)
+    //
+    // Do not trust any client-supplied user ID. User ID is always derived from the
+    // verified Bearer JWT token.
+
     struct RegisterDevicePayload: Content {
         let deviceToken: String
         let platform: String
         let appVersion: String
+        let buildNumber: String?
+        let environment: String?            // "production" | "sandbox" — defaults to "production"
         let isAuthenticated: Bool?
-        
+
         // Optional extras
         let language: String?
         let timezone: String?
+        let receiveNotifications: Bool?     // defaults to true
     }
-    
+
     app.post("device", "register") { req async throws -> HTTPStatus in
-        let timestamp = Date()
-        req.logger.info("🔥 /device/register HIT at \(timestamp.ISO8601Format())")
-        
-        // Decode request payload
+        let ts = Date()
+        req.logger.info("🔥 /device/register HIT at \(ts.ISO8601Format())")
+
         let payload = try req.content.decode(RegisterDevicePayload.self)
-        req.logger.info("📦 token=\(payload.deviceToken.prefix(8))… platform=\(payload.platform) version=\(payload.appVersion)")
-        
-        // Determine user ID from JWT (if provided)
-        let learnUserId: String
-        if let authHeader = req.headers.bearerAuthorization {
-            do {
-                learnUserId = try decodeSupabaseUID(from: authHeader.token)
-                req.logger.info("🔑 Supabase UID decoded: \(learnUserId)")
-            } catch {
-                req.logger.error("❌ Failed to decode JWT: \(error.localizedDescription)")
-                throw Abort(.unauthorized, reason: "Invalid token")
-            }
-        } else {
-            learnUserId = "anonymous"
-            req.logger.info("👤 No token found; defaulting to anonymous")
+        // Never log the raw token
+        req.logger.info("📦 token_hash=\(UserDeviceToken.hash(payload.deviceToken).prefix(12))… platform=\(payload.platform)")
+
+        let environment = payload.environment ?? "production"
+        guard environment == "production" || environment == "sandbox" else {
+            throw Abort(.badRequest, reason: "environment must be 'production' or 'sandbox'")
         }
-        
+
+        // Derive user ID from cryptographically verified JWT — never from client body.
+        let (learnUserId, supabaseUserId): (String, UUID?) = await {
+            if let uid = await req.optionalVerifiedSupabaseUserId() {
+                req.logger.info("🔑 Authenticated user \(uid)")
+                return (uid.uuidString, uid)
+            }
+            if req.headers.bearerAuthorization != nil {
+                req.logger.warning("⚠️ Invalid or unverifiable Bearer token — registering as anonymous")
+            } else {
+                req.logger.info("👤 No Bearer token — anonymous registration")
+            }
+            return ("anonymous", nil)
+        }()
+
         let now = Date()
-        
-        // Check for existing device entry
-        if let existing = try await Device.query(on: req.db)
-            .filter(\.$deviceToken == payload.deviceToken)
-            .first()
-        {
-            req.logger.info("♻️ Updating existing device ID=\(existing.id?.uuidString ?? "nil") for user \(learnUserId)")
-            
-            existing.learnUserId = learnUserId
-            existing.lastSeen = now
-            existing.language = payload.language
-            existing.timezone = payload.timezone
-            
-            do {
+        let receiveNotifications = payload.receiveNotifications ?? true
+
+        // ── Write 1: Amazon RDS legacy `devices` table ──
+        do {
+            if let existing = try await Device.query(on: req.db)
+                .filter(\.$deviceToken == payload.deviceToken)
+                .first()
+            {
+                existing.learnUserId = learnUserId
+                existing.lastSeen = now
+                existing.language = payload.language
+                existing.timezone = payload.timezone
                 try await existing.update(on: req.db)
-                req.logger.info("✅ Device updated successfully")
-            } catch {
-                req.logger.error("❌ Failed to update device: \(error.localizedDescription)")
-                throw Abort(.internalServerError, reason: "Failed to update device")
-            }
-        } else {
-            req.logger.info("🆕 Creating new device for user \(learnUserId)")
-            
-            let new = Device(
-                deviceToken: payload.deviceToken,
-                learnUserId: learnUserId,
-                platform: payload.platform,
-                appVersion: payload.appVersion,
-                lastSeen: now,
-                language: payload.language,
-                timezone: payload.timezone,
-                receiveNotifications: true,
-                lastNotified: nil
-            )
-            
-            do {
+                req.logger.info("♻️ [Amazon] Updated device")
+            } else {
+                let new = Device(
+                    deviceToken: payload.deviceToken,
+                    learnUserId: learnUserId,
+                    platform: payload.platform,
+                    appVersion: payload.appVersion,
+                    lastSeen: now,
+                    language: payload.language,
+                    timezone: payload.timezone,
+                    receiveNotifications: receiveNotifications,
+                    lastNotified: nil
+                )
                 try await new.create(on: req.db)
-                req.logger.info("✅ Device created successfully")
+                req.logger.info("🆕 [Amazon] Created device")
+            }
+        } catch {
+            req.logger.error("❌ [Amazon] Device write failed: \(error)")
+            throw Abort(.internalServerError, reason: "Failed to register device")
+        }
+
+        // ── Write 2: Supabase `user_device_tokens` table ──
+        if app.databases.ids().contains(.notifications) {
+            do {
+                try await upsertSupabaseDeviceToken(
+                    rawToken: payload.deviceToken,
+                    userID: supabaseUserId,
+                    platform: payload.platform,
+                    environment: environment,
+                    appVersion: payload.appVersion,
+                    buildNumber: payload.buildNumber,
+                    timezone: payload.timezone,
+                    receiveNotifications: receiveNotifications,
+                    db: req.db(.notifications),
+                    logger: req.logger
+                )
             } catch {
-                req.logger.error("❌ Failed to create device: \(error.localizedDescription)")
-                throw Abort(.internalServerError, reason: "Failed to save device")
+                // Phase 1: Supabase write is secondary — log but don't fail the request.
+                // Phase 2: Supabase will become primary and this will be promoted to a hard failure.
+                req.logger.error("⚠️ [Supabase] Device write failed (non-fatal in Phase 1): \(error)")
             }
         }
-        
+
         return .ok
     }
-    
-    // ───────── 4. /auth/status (user fetch) ─────────
+
+    // ───────── 4. /auth/status ─────────
     app.get("auth", "status") { req async throws -> String in
         guard let bearer = req.headers.bearerAuthorization?.token
         else { throw Abort(.unauthorized, reason: "Missing Bearer token") }
-        
+
         let userInfoURL = URI(string: "\(supabaseURL)/auth/v1/user")
         var headers = HTTPHeaders()
         headers.add(name: .authorization, value: "Bearer \(bearer)")
-        
+
         let resp = try await req.client.get(userInfoURL, headers: headers)
-        
+
         if resp.status == .ok {
             struct SupabaseUser: Content { let id: String }
             let user = try resp.content.decode(SupabaseUser.self)
@@ -169,169 +193,98 @@ func routes(_ app: Application) throws {
             return "❌ Not logged in"
         }
     }
-    
-    // ───────── 5. /send-test-push ─────────
-    struct TestPayload: Codable {
-        let acme1: String
-        let acme2: Int
-    }
-    
-    app.get("send-test-push") { req async throws -> String in
-        let token = "7943f1aa1c5b717f67cac9956be0926cfc9190f5887b38afb032849576ecd711"
-        
-        let payload = TestPayload(acme1: "Hello", acme2: 2)
-        
-        let notification = APNSAlertNotification(
-            alert: .init(
-                title: .raw("New Learn Sketch!"),
-                subtitle: .raw("Out Now - TLCS classification 🍦")
-            ),
-            expiration: .immediately,
-            priority: .immediately,
-            topic: "com.alexbaur.Snap-Ortho", // <-- Replace with your bundle ID
-            payload: payload
+
+    // ───────── 5. Notification routes ─────────
+    try registerNotificationRoutes(app)
+
+    // ───────── 6. Deprecated admin push routes (now POST, require admin key) ─────────
+    //
+    // These old paths are kept for operator convenience during Phase 1 transition.
+    // They are now authenticated and route through NotificationService.
+    // After Phase 2, migrate callers to POST /admin/notifications/broadcast.
+
+    let legacyAdmin = app.grouped(AdminAuthMiddleware())
+
+    legacyAdmin.post("send-test-push") { req async throws -> String in
+        req.logger.warning("⚠️ Deprecated: use POST /admin/notifications/test instead")
+
+        let db = req.db(.notifications)
+        let apnsEnv = req.application.storage[APNSRuntimeConfigStorageKey.self]?.environment ?? "production"
+        guard let device = try await UserDeviceToken.query(on: db)
+            .filter(\.$environment == apnsEnv)
+            .filter(\.$invalidatedAt == .null)
+            .first()
+        else {
+            return "⚠️ No registered devices found for test push"
+        }
+
+        let svc = req.application.notificationService
+        let result = try await svc.sendToDevice(
+            rawToken: device.token,
+            environment: device.environment,
+            category: .system,
+            notificationType: "admin.test",
+            title: "SnapOrtho Test",
+            body: "Push notification test 🩻",
+            allowCrossEnvironment: true,
+            db: db
         )
-        
-        try await req.apns.client.sendAlertNotification(
-            notification,
-            deviceToken: token
+        return "✅ Test push sent (deprecated). Sent=\(result.sent) Failed=\(result.failed) Skipped=\(result.skipped)"
+    }
+
+    legacyAdmin.post("send-broadcast-push") { req async throws -> String in
+        req.logger.warning("⚠️ Deprecated: use POST /admin/notifications/broadcast instead")
+        let db = req.db(.notifications)
+        let svc = req.application.notificationService
+        let result = try await svc.broadcast(
+            category: .product,
+            notificationType: "product.announcement",
+            title: "SnapOrtho",
+            body: "New content available — open the app to see what's new.",
+            deeplink: nil,
+            metadata: [:],
+            db: db
         )
-        
-        return "✅ Sent push to token: \(token.prefix(8))..."
+        return "Broadcast complete (deprecated). Sent=\(result.sent) Failed=\(result.failed) Skipped=\(result.skipped)"
     }
-    // ───────── 6. /send-missed-users-push ─────────
-    app.get("send-missed-users-push") { req async throws -> String in
-        let oneWeekAgo = Calendar.current.date(byAdding: .day, value: -7, to: Date())!
-        
-        let inactiveDevices = try await Device.query(on: req.db)
-            .filter(\.$lastSeen < oneWeekAgo)
-            .filter(\.$receiveNotifications == true)
-            .all()
-        
-        var successCount = 0
-        var failureCount = 0
-        
-        for device in inactiveDevices {
-            guard !device.deviceToken.isEmpty else { continue }
-            
-            struct ReminderPayload: Codable {
-                let reminder: String
-            }
-            
-            let payload = ReminderPayload(reminder: "We miss you!")
-            
-            let notification = APNSAlertNotification(
-                alert: .init(
-                    title: .raw("We miss you!"),
-                    subtitle: .raw("Get back in and crush your next ortho rotation 💪.")),
-                expiration: .immediately,
-                priority: .immediately,
-                topic: "com.alexbaur.Snap-Ortho",
-                payload: payload
-            )
-            
-            do {
-                try await req.apns.client.sendAlertNotification(notification, deviceToken: device.deviceToken)
-                req.logger.info("✅ Push sent to: \(device.deviceToken.prefix(10))")
-                successCount += 1
-            } catch {
-                req.logger.error("❌ Push failed to \(device.deviceToken.prefix(10)): \(error.localizedDescription)")
-                failureCount += 1
-            }
-        }
-        
-        return "Push attempt finished. Success: \(successCount), Failures: \(failureCount)"
+
+    legacyAdmin.post("send-missed-users-push") { req async throws -> String in
+        req.logger.warning("⚠️ Deprecated: use POST /admin/notifications/broadcast with inactiveDaysOnly instead")
+        let db = req.db(.notifications)
+        let svc = req.application.notificationService
+        let result = try await svc.broadcastToInactiveUsers(
+            inactiveDays: 7,
+            category: .product,
+            notificationType: "product.reactivation",
+            title: "We miss you!",
+            body: "Get back in and crush your next ortho rotation 💪.",
+            deeplink: "snaportho://home",
+            metadata: [:],
+            db: db
+        )
+        return "Missed-users push complete (deprecated). Sent=\(result.sent) Failed=\(result.failed) Skipped=\(result.skipped)"
     }
-    
-    app.get("send-broadcast-push") { req async throws -> String in
-        let devices = try await Device.query(on: req.db)
-            .filter(\.$receiveNotifications == true)
-            .all()
-        
-        var successCount = 0
-        var failureCount = 0
-        
-        for device in devices {
-            guard !device.deviceToken.isEmpty else { continue }
-            
-            struct BroadcastPayload: Codable {
-                let message: String
-            }
-            
-            let payload = BroadcastPayload(message: "New Learn Sketch!")
-            
-            let notification = APNSAlertNotification(
-                alert: .init(
-                    title: .raw("New Learn Sketch!"),
-                    subtitle: .raw("Out Now - Open fractures 🏍️")
-                ),
-                expiration: .immediately,
-                priority: .immediately,
-                topic: "com.alexbaur.Snap-Ortho",
-                payload: payload
-            )
-            
-            
-            do {
-                try await req.apns.client.sendAlertNotification(notification, deviceToken: device.deviceToken)
-                req.logger.info("✅ Broadcast push sent to: \(device.deviceToken.prefix(10))")
-                successCount += 1
-            } catch {
-                req.logger.error("❌ Broadcast push failed to \(device.deviceToken.prefix(10)): \(error.localizedDescription)")
-                failureCount += 1
-            }
-        }
-        
-        return "Broadcast complete. Success: \(successCount), Failures: \(failureCount)"
-    }
-    
-    
-    //Database debug
-    
-    app.get("debug", "devices") { req async throws -> String in
-        let devices = try await Device.query(on: req.db).all()
-        
-        var result = "📱 Registered Devices:\n"
-        for device in devices {
-            result += """
-            - Token: \(device.deviceToken.prefix(10))...
-              UserID: \(device.learnUserId)
-              Last Seen: \(device.lastSeen)
-              Notifications: \(device.receiveNotifications ? "✅" : "❌")
-              Platform: \(device.platform)
-              App Version: \(device.appVersion)
-              Timezone: \(device.timezone ?? "N/A")
-            
-            """
-        }
-        
-        return result.isEmpty ? "❌ No devices found." : result
-    }
-    
+
+    // ───────── 7. /debug/devices — REMOVED ─────────
+    // This endpoint exposed raw device tokens and had no authentication.
+    // It has been removed. Use the Supabase dashboard or admin-authenticated
+    // queries for device inspection.
+
+    // ───────── 8. Images / S3 ─────────
     let crawler = PublicS3Crawler()
-    
-    /// GET /images -- all images in the bucket
     app.get("images") { req async throws -> [ImageMetadata] in
         try await crawler.fetchAll(on: req)
     }
-    
-    struct BrobotAvgTimeResponse: Content {
-        let avgMs: Int
-    }
 
+    // ───────── 9. BroBot config ─────────
+    struct BrobotAvgTimeResponse: Content { let avgMs: Int }
     app.get("brobot", "avg-time") { req async throws -> BrobotAvgTimeResponse in
-        // fallback if env var missing or invalid
-        let fallback = 3000
-
         let raw = Environment.get("BROBOT_AVG_MS")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let ms = Int(raw) ?? fallback
-
-        // optional guardrails so you don't accidentally set something insane
-        let clamped = min(max(ms, 500), 120_000)
-
-        return BrobotAvgTimeResponse(avgMs: clamped)
+        let ms = Int(raw) ?? 3000
+        return BrobotAvgTimeResponse(avgMs: min(max(ms, 500), 120_000))
     }
-    
+
+    // ───────── 10. Stripe webhook ─────────
     app.post("stripe-webhook") { req async throws -> HTTPStatus in
         guard let secret = Environment.get("STRIPE_WEBHOOK_SECRET"), !secret.isEmpty else {
             req.logger.critical("Missing STRIPE_WEBHOOK_SECRET")
@@ -347,7 +300,6 @@ func routes(_ app: Application) throws {
         try StripeWebhook.verifySignature(payload: rawBody, signatureHeader: sigHeader, secret: secret)
 
         let event = try StripeWebhook.decodeEvent(from: rawBody)
-
         guard event.type == "payment_intent.succeeded" else { return .ok }
 
         let pi = event.data.object
@@ -366,6 +318,7 @@ func routes(_ app: Application) throws {
             return .ok
         }
 
+        // Donations stay in Amazon RDS — intentionally using req.db (not .notifications)
         try await (req.db as! any PostgresDatabase).sql().raw("""
             INSERT INTO donations
                 (billing_name, display_name, anonymous, email, message, amount, stripe_id, status)
@@ -383,84 +336,44 @@ func routes(_ app: Application) throws {
 
         return .ok
     }
-    
-    // ───────── Donations API (for website) ─────────
 
+    // ───────── 11. Donations API ─────────
     struct DonationDTO: Content {
-        let name: String
-        let amount: Int           // dollars for UI
-        let dateISO: String
-        let via: String
-        let note: String?
+        let name: String; let amount: Int; let dateISO: String; let via: String; let note: String?
     }
-
-    struct DonationTotalsDTO: Content {
-        let sumCents: Int
-        let sumDollars: Int
-        let count: Int
-    }
-
-    struct DonationsResponseDTO: Content {
-        let source: String
-        let donations: [DonationDTO]
-        let totals: DonationTotalsDTO
-    }
+    struct DonationTotalsDTO: Content { let sumCents: Int; let sumDollars: Int; let count: Int }
+    struct DonationsResponseDTO: Content { let source: String; let donations: [DonationDTO]; let totals: DonationTotalsDTO }
 
     app.get("donations") { req async throws -> DonationsResponseDTO in
-        // limit=80 default, clamp to 1...200
         let limit = min(max((try? req.query.get(Int.self, at: "limit")) ?? 80, 1), 200)
-
         req.logger.info("📥 GET /donations limit=\(limit)")
-
-        // Make sure we're on Postgres
         let sql = (req.db as! any PostgresDatabase).sql()
 
-        // 1) Totals
         let totalsRow = try await sql.raw("""
-            SELECT
-              COALESCE(SUM(amount), 0)::bigint AS sum_cents,
-              COUNT(*)::bigint AS count
-            FROM donations
-            WHERE status = 'paid'
+            SELECT COALESCE(SUM(amount), 0)::bigint AS sum_cents, COUNT(*)::bigint AS count
+            FROM donations WHERE status = 'paid'
         """).first()
 
         let sumCents = Int((try? totalsRow?.decode(column: "sum_cents", as: Int64.self)) ?? 0)
-        let count = Int((try? totalsRow?.decode(column: "count", as: Int64.self)) ?? 0)
+        let count    = Int((try? totalsRow?.decode(column: "count",     as: Int64.self)) ?? 0)
 
-        // 2) Recent list
         let rows = try await sql.raw("""
-            SELECT
-              display_name,
-              anonymous,
-              message,
-              amount,
-              created_at
-            FROM donations
-            WHERE status = 'paid'
-            ORDER BY created_at DESC NULLS LAST
-            LIMIT \(bind: limit)
+            SELECT display_name, anonymous, message, amount, created_at
+            FROM donations WHERE status = 'paid'
+            ORDER BY created_at DESC NULLS LAST LIMIT \(bind: limit)
         """).all()
 
         let donations: [DonationDTO] = rows.map { row in
             let display = ((try? row.decode(column: "display_name", as: String?.self)) ?? nil)?
                 .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-
-            let anonymous = (try? row.decode(column: "anonymous", as: Bool?.self)) ?? nil
             let message = ((try? row.decode(column: "message", as: String?.self)) ?? nil)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-
-            let amountCents64 = (try? row.decode(column: "amount", as: Int64.self)) ?? 0
-            let amountDollars = Int((amountCents64 + 50) / 100) // rounded dollars
-
+            let amountCents = (try? row.decode(column: "amount", as: Int64.self)) ?? 0
             let createdAt = (try? row.decode(column: "created_at", as: Date?.self)) ?? nil
-            let dateISO = createdAt?.ISO8601Format() ?? ""
-
-            let name = display
-
             return DonationDTO(
-                name: name,
-                amount: amountDollars,
-                dateISO: dateISO,
+                name: display,
+                amount: Int((amountCents + 50) / 100),
+                dateISO: createdAt?.ISO8601Format() ?? "",
                 via: "Stripe",
                 note: (message?.isEmpty == false) ? message : nil
             )
@@ -476,8 +389,8 @@ func routes(_ app: Application) throws {
             )
         )
     }
-    
-    //Bro logs
+
+    // ───────── 12. CasePrepLog ─────────
     app.post("case-prep-log") { req async throws -> HTTPStatus in
         let log = try req.content.decode(CasePrepLog.self)
         try await log.save(on: req.db)
@@ -486,12 +399,9 @@ func routes(_ app: Application) throws {
 }
 
 
-
-
-// MARK: – JWT decoder for Supabase UID
+// MARK: – JWT decoder for Supabase UID (legacy — preserved for backward compatibility)
 func decodeSupabaseUID(from jwt: String) throws -> String {
     struct Claims: Decodable { let sub: String }
-
     let parts = jwt.split(separator: ".")
     guard parts.count == 3,
           let payloadData = Data(base64URLEncoded: String(parts[1])) else {
@@ -505,9 +415,7 @@ private extension Data {
         var base64 = input
             .replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
-        while base64.count % 4 != 0 {
-            base64 += "="
-        }
+        while base64.count % 4 != 0 { base64 += "=" }
         self.init(base64Encoded: base64)
     }
 }
