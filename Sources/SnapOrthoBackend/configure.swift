@@ -42,31 +42,29 @@ public func configure(_ app: Application) throws {
     // ─────────────  Supabase Postgres (notification tables)  ─────────────
     if let supabaseURL = Environment.get("SUPABASE_DATABASE_URL") {
         do {
-            try app.databases.use(
-                .postgres(url: supabaseURL, maxConnectionsPerEventLoop: 2),
+            var supabaseTLS = TLSConfiguration.makeClientConfiguration()
+            supabaseTLS.certificateVerification = .none
+
+            guard var supabaseConfig = PostgresConfiguration(url: supabaseURL) else {
+                throw Abort(.internalServerError, reason: "Invalid SUPABASE_DATABASE_URL")
+            }
+            supabaseConfig.tlsConfiguration = supabaseTLS
+
+            app.databases.use(
+                .postgres(
+                    configuration: supabaseConfig,
+                    maxConnectionsPerEventLoop: 2,
+                    connectionPoolTimeout: .seconds(20)
+                ),
                 as: .notifications
             )
+
             app.logger.info("✅ Supabase notifications DB configured")
         } catch {
             app.logger.error("❌ Failed to configure Supabase DB: \(error)")
             if app.environment == .production {
                 throw error
             }
-        }
-    } else {
-        if app.environment == .production {
-            app.logger.critical("❌ SUPABASE_DATABASE_URL is required in production")
-            throw Abort(.internalServerError)
-        } else if app.environment == .testing {
-            // In tests: reuse Amazon RDS connection for the .notifications database
-            // so Fluent migrations and model queries work without a real Supabase URL.
-            app.databases.use(
-                .postgres(configuration: postgresConfig, maxConnectionsPerEventLoop: 2, connectionPoolTimeout: .seconds(20)),
-                as: .notifications
-            )
-            app.logger.warning("⚠️ SUPABASE_DATABASE_URL not set — using Amazon RDS for .notifications in test mode")
-        } else {
-            app.logger.warning("⚠️ SUPABASE_DATABASE_URL not set — Supabase notification features disabled in development")
         }
     }
 
