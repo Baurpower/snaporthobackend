@@ -14,3 +14,7 @@ db.sqlite
 .env.local
 .env.production
 .env.development
+.env
+.env.local
+.env.production
+.env.development

@@ -12,6 +12,10 @@ enum CandidateSourceType: String, CaseIterable, Sendable {
     case brobotFirstTrial       = "brobot_first_trial"
     case learningDaily          = "learning_daily"
     case conversionHighEngagement = "conversion_high_engagement"
+    /// Phase 2B: a user-tailored OITE question, used instead of the generic daily pearl
+    /// when the user has a usable `training_level`. Slightly higher priority than the
+    /// generic pearl since it's more personalized, but still below first-trial activation.
+    case learningOiteQuestion   = "learning_oite_question"
 
     /// Static priority score from the strategy doc's ranking model (Part 6).
     /// Higher fires first when multiple candidates are eligible for one user on one day.
@@ -23,6 +27,7 @@ enum CandidateSourceType: String, CaseIterable, Sendable {
         case .conversionUsageLimit:     return 60
         case .learningRecentTopic:      return 50
         case .brobotFirstTrial:         return 45
+        case .learningOiteQuestion:     return 42
         case .learningDaily:            return 40
         case .conversionHighEngagement: return 15
         }
@@ -34,7 +39,7 @@ enum CandidateSourceType: String, CaseIterable, Sendable {
             return .brobot
         case .conversionUsageLimit, .conversionHighEngagement:
             return .product
-        case .learningRecentTopic, .learningDaily:
+        case .learningRecentTopic, .learningDaily, .learningOiteQuestion:
             return .learning
         }
     }

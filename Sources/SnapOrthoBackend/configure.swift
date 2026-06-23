@@ -99,6 +99,10 @@ public func configure(_ app: Application) throws {
     app.migrations.add(CreateNotificationInteractions(), to: .notifications)
     app.migrations.add(CreateNotificationUserState(), to: .notifications)
 
+    // ─────────────  Phase 2B: Learning + First-BroBot-Try Candidates  ─────────────
+    app.migrations.add(AddNotificationTypeToCandidates(), to: .notifications)
+    app.migrations.add(AddGranularHoldoutColumns(), to: .notifications)
+
     try app.autoMigrate().wait()
 
     // ─────────────  Supabase Service Role Key  ─────────────
@@ -171,6 +175,9 @@ public func configure(_ app: Application) throws {
 
     // ─────────────  Custom Commands  ─────────────
     app.asyncCommands.use(BackfillNotificationTokensCommand(), as: BackfillNotificationTokensCommand.name)
+    app.asyncCommands.use(SeedNotificationTemplatesCommand(), as: SeedNotificationTemplatesCommand.name)
+    app.asyncCommands.use(GenerateLearningCandidatesCommand(), as: GenerateLearningCandidatesCommand.name)
+    app.asyncCommands.use(ProcessScheduledNotificationsCommand(), as: ProcessScheduledNotificationsCommand.name)
 
     // ─────────────  Phase 2A: Candidate Scheduler  ─────────────
     // No-op generation/dispatch in Phase 2A — only validates the recurring loop itself

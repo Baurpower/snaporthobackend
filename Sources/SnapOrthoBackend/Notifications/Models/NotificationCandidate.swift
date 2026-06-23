@@ -25,6 +25,10 @@ final class NotificationCandidate: Model, @unchecked Sendable {
 
     @Field(key: "category") var category: String
 
+    /// Fine-grained type, e.g. "learning.daily_pearl" — joins against `notification_templates`.
+    /// Phase 2A only had `source_type` (the broader bucket); added in Phase 2B.
+    @OptionalField(key: "notification_type") var notificationType: String?
+
     @Field(key: "priority_score") var priorityScore: Int
 
     @Field(key: "payload") var payload: [String: String]
@@ -45,6 +49,7 @@ final class NotificationCandidate: Model, @unchecked Sendable {
         sourceType: String,
         sourceRefId: UUID? = nil,
         category: NotificationCategory,
+        notificationType: String? = nil,
         priorityScore: Int,
         payload: [String: String] = [:],
         eligibleAt: Date,
@@ -56,6 +61,7 @@ final class NotificationCandidate: Model, @unchecked Sendable {
         self.sourceType = sourceType
         self.sourceRefId = sourceRefId
         self.category = category.rawValue
+        self.notificationType = notificationType
         self.priorityScore = priorityScore
         self.payload = payload
         self.eligibleAt = eligibleAt

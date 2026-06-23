@@ -32,9 +32,22 @@ final class NotificationUserState: Model, @unchecked Sendable {
     /// Start-of-week this row's weekly counter applies to. Same reset semantics as `dayBucket`.
     @OptionalField(key: "week_bucket") var weekBucket: Date?
 
-    /// Deterministic, permanent holdout assignment — see `HoldoutAssignment`.
-    /// Never reassigned once set.
+    /// Deterministic, permanent, randomly-assigned holdout — see `HoldoutAssignment`.
+    /// Never reassigned once set. This is the master kill-switch for clean retention
+    /// measurement — distinct from the three operator-set flags below.
     @Field(key: "is_holdout") var isHoldout: Bool
+
+    /// Phase 2B: operator-set, defaults false. Suppresses `learning` category candidates
+    /// for this user specifically, independent of the random global `isHoldout`.
+    @Field(key: "is_learning_holdout") var isLearningHoldout: Bool
+
+    /// Phase 2B: operator-set, defaults false. Suppresses `brobot` category candidates.
+    @Field(key: "is_brobot_holdout") var isBrobotHoldout: Bool
+
+    /// Phase 2B: operator-set, defaults false. Suppresses every growth-candidate type
+    /// (everything Phase 2B generates) for this user, without affecting `isHoldout`'s
+    /// global measurement role.
+    @Field(key: "is_all_growth_holdout") var isAllGrowthHoldout: Bool
 
     init() {}
 
@@ -47,7 +60,10 @@ final class NotificationUserState: Model, @unchecked Sendable {
         lastSentCategory: String? = nil,
         dayBucket: Date? = nil,
         weekBucket: Date? = nil,
-        isHoldout: Bool
+        isHoldout: Bool,
+        isLearningHoldout: Bool = false,
+        isBrobotHoldout: Bool = false,
+        isAllGrowthHoldout: Bool = false
     ) {
         self.id = id
         self.userId = userId
@@ -58,5 +74,8 @@ final class NotificationUserState: Model, @unchecked Sendable {
         self.dayBucket = dayBucket
         self.weekBucket = weekBucket
         self.isHoldout = isHoldout
+        self.isLearningHoldout = isLearningHoldout
+        self.isBrobotHoldout = isBrobotHoldout
+        self.isAllGrowthHoldout = isAllGrowthHoldout
     }
 }
