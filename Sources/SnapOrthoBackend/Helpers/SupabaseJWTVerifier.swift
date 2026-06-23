@@ -1,6 +1,11 @@
+import Foundation
+
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+
 import Vapor
 import JWTKit
-import Foundation
 import Supabase
 
 // MARK: - Payload
