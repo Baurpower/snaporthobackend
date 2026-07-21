@@ -35,6 +35,16 @@ struct BackfillNotificationTokensCommand: AsyncCommand {
 
         logger.info("🚀 Starting notification token backfill (dry-run=\(dryRun), batchSize=\(batchSize))")
 
+        guard app.rdsAvailable else {
+            logger.error("❌ RDS fallback database is not configured — cannot read legacy devices table")
+            throw Abort(.failedDependency, reason: "DATABASE_* env vars required for backfill source")
+        }
+
+        guard app.databases.ids().contains(.notifications) else {
+            logger.error("❌ Supabase notifications database is not configured")
+            throw Abort(.failedDependency, reason: "SUPABASE_DATABASE_URL required for backfill target")
+        }
+
         let amazonDB = app.db(.psql)
         let supabaseDB = app.db(.notifications)
 

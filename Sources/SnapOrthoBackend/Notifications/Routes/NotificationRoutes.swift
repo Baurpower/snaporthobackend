@@ -43,7 +43,7 @@ struct AdminBroadcastRequest: Content {
 
 struct AdminTestPushRequest: Content {
     let deviceToken: String
-    let environment: String?
+    let environment: String
     let title: String?
     let body: String?
 }
@@ -63,6 +63,9 @@ func registerNotificationRoutes(_ app: Application) throws {
         let payload = try req.content.decode(DeregisterDeviceRequest.self)
         let tokenHash = UserDeviceToken.hash(payload.deviceToken)
         let environment = payload.environment ?? "production"
+        guard environment == "production" || environment == "sandbox" else {
+            throw Abort(.badRequest, reason: "environment must be 'production' or 'sandbox'")
+        }
 
         let db = req.db(.notifications)
         let device = try await UserDeviceToken.query(on: db)
@@ -149,7 +152,13 @@ func registerNotificationRoutes(_ app: Application) throws {
     // POST /admin/notifications/test
     admin.post("admin", "notifications", "test") { req async throws -> NotificationBroadcastResult in
         let payload = try req.content.decode(AdminTestPushRequest.self)
-        let environment = payload.environment ?? "production"
+        let environment = payload.environment
+        guard environment == "production" || environment == "sandbox" else {
+            throw Abort(.badRequest, reason: "environment must be 'production' or 'sandbox'")
+        }
+        guard environment == req.application.notificationService.apnsEnvironment else {
+            throw Abort(.conflict, reason: "Requested environment does not match this server's APNS endpoint")
+        }
         let title = payload.title ?? "SnapOrtho Test"
         let body = payload.body ?? "Push notification test 🩻"
 
@@ -161,7 +170,6 @@ func registerNotificationRoutes(_ app: Application) throws {
             notificationType: "admin.test",
             title: title,
             body: body,
-            allowCrossEnvironment: true,
             db: req.db(.notifications)
         )
 
@@ -214,9 +222,8 @@ func registerNotificationRoutes(_ app: Application) throws {
 
 // MARK: - Dual-write device registration helper
 
-/// Called from the existing POST /device/register handler to write into Supabase.
-/// This is the Phase 1 dual-write path: Amazon legacy write happens in routes.swift,
-/// then this is called for the Supabase write.
+/// Called from POST /device/register to write into Supabase (primary datastore).
+/// Amazon RDS legacy write is optional best-effort fallback in routes.swift.
 func upsertSupabaseDeviceToken(
     rawToken: String,
     userID: UUID?,
@@ -229,7 +236,12 @@ func upsertSupabaseDeviceToken(
     db: any Database,
     logger: Logger
 ) async throws {
-    let tokenHash = UserDeviceToken.hash(rawToken)
+    let normalizedToken = rawToken.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard normalizedToken.count == 64,
+          normalizedToken.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "0123456789abcdef").contains($0) }) else {
+        throw Abort(.badRequest, reason: "deviceToken must be a 64-character hexadecimal APNS token")
+    }
+    let tokenHash = UserDeviceToken.hash(normalizedToken)
     let now = Date()
 
     if let existing = try await UserDeviceToken.query(on: db)
@@ -239,6 +251,8 @@ func upsertSupabaseDeviceToken(
     {
         // Update in place — preserve invalidation state if already marked
         existing.userId = userID
+        existing.token = normalizedToken
+        existing.platform = platform
         existing.appVersion = appVersion
         existing.buildNumber = buildNumber
         existing.timezone = timezone
@@ -247,11 +261,11 @@ func upsertSupabaseDeviceToken(
         // Re-activate if app registered again (user re-installed)
         existing.invalidatedAt = nil
         try await existing.update(on: db)
-        logger.info("♻️ Updated Supabase device token_hash=\(tokenHash.prefix(12))")
+        logger.info("♻️ [datastore] primary=supabase device_upsert=update token_hash=\(tokenHash.prefix(12))")
     } else {
         let device = UserDeviceToken(
             userId: userID,
-            token: rawToken,
+            token: normalizedToken,
             platform: platform,
             environment: environment,
             appVersion: appVersion,
@@ -261,8 +275,6 @@ func upsertSupabaseDeviceToken(
             lastSeenAt: now
         )
         try await device.create(on: db)
-        logger.info("🆕 Created Supabase device token_hash=\(tokenHash.prefix(12))")
+        logger.info("🆕 [datastore] primary=supabase device_upsert=create token_hash=\(tokenHash.prefix(12))")
     }
 }
-
-

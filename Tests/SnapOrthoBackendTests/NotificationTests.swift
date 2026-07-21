@@ -144,10 +144,67 @@ struct NotificationTests {
 
     // MARK: - Device Registration
 
+    @Test("Token hashing is canonical across case and surrounding whitespace")
+    func tokenHashNormalization() {
+        let lower = String(repeating: "ab", count: 32)
+        #expect(UserDeviceToken.hash(lower) == UserDeviceToken.hash("  \(lower.uppercased())\n"))
+    }
+
+    @Test("Device registration rejects malformed APNS tokens")
+    func deviceRegistrationRejectsMalformedToken() async throws {
+        try await withApp { app in
+            try await app.testing().test(
+                .POST, "device/register",
+                beforeRequest: { req in
+                    try req.content.encode(RegisterDevicePayload(
+                        deviceToken: "not-an-apns-token",
+                        platform: "ios",
+                        appVersion: "3.0.0",
+                        timezone: "America/Los_Angeles"
+                    ))
+                },
+                afterResponse: { res async in
+                    #expect(res.status == .badRequest)
+                }
+            )
+        }
+    }
+
+    @Test("Device registration succeeds with Supabase primary even when RDS tables are absent")
+    func deviceRegistrationSupabasePrimaryWithoutRDSWrites() async throws {
+        try await withApp { app in
+            guard !app.rdsAvailable else {
+                Issue.record("Skipped: RDS is configured in this environment — run without DATABASE_* to assert fallback skip")
+                return
+            }
+
+            let token = String(repeating: "a", count: 64)
+            try await app.testing().test(
+                .POST, "device/register",
+                beforeRequest: { req in
+                    try req.content.encode(RegisterDevicePayload(
+                        deviceToken: token,
+                        platform: "ios",
+                        appVersion: "3.0.0",
+                        timezone: "America/Los_Angeles"
+                    ))
+                },
+                afterResponse: { res async in
+                    #expect(res.status == .ok)
+                }
+            )
+
+            let count = try await UserDeviceToken.query(on: app.db(.notifications))
+                .filter(\.$tokenHash == UserDeviceToken.hash(token))
+                .count()
+            #expect(count == 1)
+        }
+    }
+
     @Test("Device registration upserts rather than duplicating")
     func deviceRegistrationUpserts() async throws {
         try await withApp { app in
-            let token = "test-token-\(UUID().uuidString)"
+            let token = String(repeating: "b", count: 64)
             let tokenHash = UserDeviceToken.hash(token)
 
             // Register once
@@ -419,6 +476,55 @@ struct NotificationTests {
         }
     }
 
+    @Test("sendToDevice rejects endpoint environment mismatch without contacting APNS")
+    func sendToDeviceRejectsEnvironmentMismatch() async throws {
+        try await withApp { app in
+            let token = String(repeating: "c", count: 64)
+            let device = UserDeviceToken(userId: nil, token: token, platform: "ios", environment: "sandbox")
+            try await device.create(on: app.db(.notifications))
+
+            do {
+                _ = try await app.notificationService.sendToDevice(
+                    rawToken: token,
+                    environment: "sandbox",
+                    notificationType: "admin.test",
+                    title: "SnapOrtho Test",
+                    body: "Notification delivery is working.",
+                    db: app.db(.notifications)
+                )
+                Issue.record("Expected environment mismatch")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .conflict)
+            }
+            #expect(mockAPNS.calls.isEmpty)
+        }
+    }
+
+    @Test("sendToDevice rejects opted-out device without contacting APNS")
+    func sendToDeviceRejectsOptedOutDevice() async throws {
+        try await withApp { app in
+            let token = String(repeating: "d", count: 64)
+            let device = UserDeviceToken(userId: nil, token: token, platform: "ios", environment: "production")
+            device.receiveNotifications = false
+            try await device.create(on: app.db(.notifications))
+
+            do {
+                _ = try await app.notificationService.sendToDevice(
+                    rawToken: token,
+                    environment: "production",
+                    notificationType: "admin.test",
+                    title: "SnapOrtho Test",
+                    body: "Notification delivery is working.",
+                    db: app.db(.notifications)
+                )
+                Issue.record("Expected opted-out device rejection")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .conflict)
+            }
+            #expect(mockAPNS.calls.isEmpty)
+        }
+    }
+
     // MARK: - Preferences
 
     @Test("Unauthenticated preferences request rejected")
@@ -669,7 +775,7 @@ private struct RegisterDevicePayload: Content {
     let appVersion: String
     let timezone: String?
     var buildNumber: String? = nil
-    var environment: String? = nil
+    var environment: String = "production"
 }
 
 private struct DeregisterDeviceRequest: Content {

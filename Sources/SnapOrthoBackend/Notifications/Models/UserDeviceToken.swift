@@ -75,7 +75,8 @@ final class UserDeviceToken: Model, @unchecked Sendable {
     // MARK: - Token helpers
 
     static func hash(_ rawToken: String) -> String {
-        let digest = SHA256.hash(data: Data(rawToken.utf8))
+        let normalized = rawToken.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let digest = SHA256.hash(data: Data(normalized.utf8))
         return digest.compactMap { String(format: "%02x", $0) }.joined()
     }
 

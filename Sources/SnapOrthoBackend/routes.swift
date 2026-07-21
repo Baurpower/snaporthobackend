@@ -18,15 +18,10 @@ extension Application {
 // MARK: – Main routes
 func routes(_ app: Application) throws {
 
-    // Sanity log — only prefix, never the full key
-    let keyPrefix = Environment.get("SUPABASE_SERVICE_ROLE_KEY")?.prefix(10) ?? "MISSING"
-    app.logger.info("SERVICE ROLE KEY PREFIX: \(keyPrefix)")
-
     // ───────── 1. Basic public routes ─────────
     app.get { _ async in "SnapOrtho Backend is live!" }
     app.get("hello") { _ async -> String in "Hello, world!" }
 
-    try app.register(collection: TodoController())
     try app.register(collection: YoutubeController())
 
     let supabaseURL = URL(string: "https://geznczcokbgybsseipjg.supabase.co")!
@@ -64,11 +59,10 @@ func routes(_ app: Application) throws {
         }
     }
 
-    // ───────── 3. POST /device/register (dual-write) ─────────
+    // ───────── 3. POST /device/register (Supabase primary + RDS fallback) ─────────
     //
-    // Phase 1 dual-write:
-    //   1. Write to Amazon RDS `devices` (backward compat — existing app behavior)
-    //   2. Write to Supabase `user_device_tokens` (new source of truth for notifications)
+    // Supabase `user_device_tokens` is the source of truth for notifications.
+    // Amazon RDS `devices` is a temporary best-effort fallback only.
     //
     // Do not trust any client-supplied user ID. User ID is always derived from the
     // verified Bearer JWT token.
@@ -78,7 +72,7 @@ func routes(_ app: Application) throws {
         let platform: String
         let appVersion: String
         let buildNumber: String?
-        let environment: String?            // "production" | "sandbox" — defaults to "production"
+        let environment: String             // "production" | "sandbox" — required to prevent APNS misrouting
         let isAuthenticated: Bool?
 
         // Optional extras
@@ -95,19 +89,20 @@ func routes(_ app: Application) throws {
         // Never log the raw token
         req.logger.info("📦 token_hash=\(UserDeviceToken.hash(payload.deviceToken).prefix(12))… platform=\(payload.platform)")
 
-        let environment = payload.environment ?? "production"
+        let environment = payload.environment
         guard environment == "production" || environment == "sandbox" else {
             throw Abort(.badRequest, reason: "environment must be 'production' or 'sandbox'")
         }
 
         // Derive user ID from cryptographically verified JWT — never from client body.
-        let (learnUserId, supabaseUserId): (String, UUID?) = await {
+        let (learnUserId, supabaseUserId): (String, UUID?) = try await {
             if let uid = await req.optionalVerifiedSupabaseUserId() {
                 req.logger.info("🔑 Authenticated user \(uid)")
                 return (uid.uuidString, uid)
             }
             if req.headers.bearerAuthorization != nil {
-                req.logger.warning("⚠️ Invalid or unverifiable Bearer token — registering as anonymous")
+                req.logger.warning("⚠️ Invalid or unverifiable Bearer token — rejecting registration")
+                throw Abort(.unauthorized, reason: "Invalid bearer token")
             } else {
                 req.logger.info("👤 No Bearer token — anonymous registration")
             }
@@ -117,58 +112,49 @@ func routes(_ app: Application) throws {
         let now = Date()
         let receiveNotifications = payload.receiveNotifications ?? true
 
-        // ── Write 1: Amazon RDS legacy `devices` table ──
+        guard app.databases.ids().contains(.notifications) else {
+            req.logger.error("❌ [datastore] primary=supabase device_write=failure reason=notifications_db_unconfigured")
+            throw Abort(.internalServerError, reason: "Notification datastore unavailable")
+        }
+
+        // ── Write 1 (required): Supabase `user_device_tokens` ──
         do {
-            if let existing = try await Device.query(on: req.db)
-                .filter(\.$deviceToken == payload.deviceToken)
-                .first()
-            {
-                existing.learnUserId = learnUserId
-                existing.lastSeen = now
-                existing.language = payload.language
-                existing.timezone = payload.timezone
-                try await existing.update(on: req.db)
-                req.logger.info("♻️ [Amazon] Updated device")
-            } else {
-                let new = Device(
-                    deviceToken: payload.deviceToken,
-                    learnUserId: learnUserId,
-                    platform: payload.platform,
-                    appVersion: payload.appVersion,
-                    lastSeen: now,
-                    language: payload.language,
-                    timezone: payload.timezone,
-                    receiveNotifications: receiveNotifications,
-                    lastNotified: nil
-                )
-                try await new.create(on: req.db)
-                req.logger.info("🆕 [Amazon] Created device")
-            }
+            try await upsertSupabaseDeviceToken(
+                rawToken: payload.deviceToken,
+                userID: supabaseUserId,
+                platform: payload.platform,
+                environment: environment,
+                appVersion: payload.appVersion,
+                buildNumber: payload.buildNumber,
+                timezone: payload.timezone,
+                receiveNotifications: receiveNotifications,
+                db: req.db(.notifications),
+                logger: req.logger
+            )
+            req.logger.info("✅ [datastore] primary=supabase device_write=success token_hash=\(UserDeviceToken.hash(payload.deviceToken).prefix(12))")
         } catch {
-            req.logger.error("❌ [Amazon] Device write failed: \(error)")
+            req.logger.error("❌ [datastore] primary=supabase device_write=failure error=\(String(describing: error))")
             throw Abort(.internalServerError, reason: "Failed to register device")
         }
 
-        // ── Write 2: Supabase `user_device_tokens` table ──
-        if app.databases.ids().contains(.notifications) {
-            do {
-                try await upsertSupabaseDeviceToken(
-                    rawToken: payload.deviceToken,
-                    userID: supabaseUserId,
+        // ── Write 2 (optional): Amazon RDS legacy `devices` table ──
+        if app.rdsAvailable {
+            await LegacyRDSWrites.upsertLegacyDevice(
+                payload: LegacyDevicePayload(
+                    deviceToken: payload.deviceToken,
                     platform: payload.platform,
-                    environment: environment,
                     appVersion: payload.appVersion,
-                    buildNumber: payload.buildNumber,
-                    timezone: payload.timezone,
-                    receiveNotifications: receiveNotifications,
-                    db: req.db(.notifications),
-                    logger: req.logger
-                )
-            } catch {
-                // Phase 1: Supabase write is secondary — log but don't fail the request.
-                // Phase 2: Supabase will become primary and this will be promoted to a hard failure.
-                req.logger.error("⚠️ [Supabase] Device write failed (non-fatal in Phase 1): \(error)")
-            }
+                    language: payload.language,
+                    timezone: payload.timezone
+                ),
+                learnUserId: learnUserId,
+                receiveNotifications: receiveNotifications,
+                now: now,
+                db: req.db(.psql),
+                logger: req.logger
+            )
+        } else {
+            req.logger.info("ℹ️ [datastore] primary=supabase rds_fallback=skipped reason=rds_unconfigured")
         }
 
         return .ok
@@ -206,30 +192,8 @@ func routes(_ app: Application) throws {
     let legacyAdmin = app.grouped(AdminAuthMiddleware())
 
     legacyAdmin.post("send-test-push") { req async throws -> String in
-        req.logger.warning("⚠️ Deprecated: use POST /admin/notifications/test instead")
-
-        let db = req.db(.notifications)
-        let apnsEnv = req.application.storage[APNSRuntimeConfigStorageKey.self]?.environment ?? "production"
-        guard let device = try await UserDeviceToken.query(on: db)
-            .filter(\.$environment == apnsEnv)
-            .filter(\.$invalidatedAt == .null)
-            .first()
-        else {
-            return "⚠️ No registered devices found for test push"
-        }
-
-        let svc = req.application.notificationService
-        let result = try await svc.sendToDevice(
-            rawToken: device.token,
-            environment: device.environment,
-            category: .system,
-            notificationType: "admin.test",
-            title: "SnapOrtho Test",
-            body: "Push notification test 🩻",
-            allowCrossEnvironment: true,
-            db: db
-        )
-        return "✅ Test push sent (deprecated). Sent=\(result.sent) Failed=\(result.failed) Skipped=\(result.skipped)"
+        req.logger.warning("⚠️ Rejected unsafe deprecated test route; exact token and environment are required")
+        throw Abort(.gone, reason: "Use POST /admin/notifications/test with an exact deviceToken and environment")
     }
 
     legacyAdmin.post("send-broadcast-push") { req async throws -> String in
@@ -284,8 +248,9 @@ func routes(_ app: Application) throws {
         return BrobotAvgTimeResponse(avgMs: min(max(ms, 500), 120_000))
     }
 
-    // ───────── 10. Stripe webhook ─────────
+    // ───────── 10. Stripe webhook (DEPRECATED — use snap-ortho.com/api/stripe/donation-webhook) ─────────
     app.post("stripe-webhook") { req async throws -> HTTPStatus in
+        req.logger.warning("⚠️ DEPRECATED: POST /stripe-webhook — migrate Stripe endpoint to /api/stripe/donation-webhook on snap-ortho.com")
         guard let secret = Environment.get("STRIPE_WEBHOOK_SECRET"), !secret.isEmpty else {
             req.logger.critical("Missing STRIPE_WEBHOOK_SECRET")
             throw Abort(.internalServerError)
@@ -318,8 +283,12 @@ func routes(_ app: Application) throws {
             return .ok
         }
 
-        // Donations stay in Amazon RDS — intentionally using req.db (not .notifications)
-        try await (req.db as! any PostgresDatabase).sql().raw("""
+        guard app.rdsAvailable else {
+            req.logger.warning("⚠️ DEPRECATED donation webhook received but RDS fallback is disabled — configure Next.js donation webhook")
+            return .ok
+        }
+
+        try await (req.db(.psql) as! any PostgresDatabase).sql().raw("""
             INSERT INTO donations
                 (billing_name, display_name, anonymous, email, message, amount, stripe_id, status)
             VALUES
@@ -345,9 +314,14 @@ func routes(_ app: Application) throws {
     struct DonationsResponseDTO: Content { let source: String; let donations: [DonationDTO]; let totals: DonationTotalsDTO }
 
     app.get("donations") { req async throws -> DonationsResponseDTO in
+        req.logger.warning("⚠️ DEPRECATED: GET /donations — use https://snap-ortho.com/api/donations")
+        guard app.rdsAvailable else {
+            throw Abort(.serviceUnavailable, reason: "Legacy donations API disabled — use snap-ortho.com/api/donations")
+        }
+
         let limit = min(max((try? req.query.get(Int.self, at: "limit")) ?? 80, 1), 200)
         req.logger.info("📥 GET /donations limit=\(limit)")
-        let sql = (req.db as! any PostgresDatabase).sql()
+        let sql = (req.db(.psql) as! any PostgresDatabase).sql()
 
         let totalsRow = try await sql.raw("""
             SELECT COALESCE(SUM(amount), 0)::bigint AS sum_cents, COUNT(*)::bigint AS count
@@ -390,10 +364,41 @@ func routes(_ app: Application) throws {
         )
     }
 
-    // ───────── 12. CasePrepLog ─────────
+    // ───────── 12. CasePrepLog (Supabase primary + RDS fallback) ─────────
     app.post("case-prep-log") { req async throws -> HTTPStatus in
         let log = try req.content.decode(CasePrepLog.self)
-        try await log.save(on: req.db)
+
+        guard app.databases.ids().contains(.notifications) else {
+            req.logger.error("❌ [datastore] primary=supabase case_prep_write=failure reason=notifications_db_unconfigured")
+            throw Abort(.internalServerError, reason: "Case prep datastore unavailable")
+        }
+
+        do {
+            try await SupabaseAnalyticsWrites.insertCasePrepLog(
+                prompt: log.prompt,
+                responseJSON: log.responseJSON,
+                wasHelpful: log.wasHelpful,
+                userFeedback: log.userFeedback,
+                source: "vapor",
+                db: req.db(.notifications),
+                logger: req.logger
+            )
+        } catch {
+            req.logger.error("❌ [datastore] primary=supabase case_prep_write=failure error=\(String(describing: error))")
+            throw Abort(.internalServerError, reason: "Failed to save case prep log")
+        }
+
+        if app.rdsAvailable {
+            await LegacyRDSWrites.insertLegacyCasePrepLog(
+                prompt: log.prompt,
+                responseJSON: log.responseJSON,
+                wasHelpful: log.wasHelpful,
+                userFeedback: log.userFeedback,
+                db: req.db(.psql),
+                logger: req.logger
+            )
+        }
+
         return .created
     }
 }

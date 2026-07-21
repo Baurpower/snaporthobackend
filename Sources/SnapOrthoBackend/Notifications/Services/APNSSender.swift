@@ -37,6 +37,7 @@ struct APNSSendResult: Sendable {
 
 enum APNSTokenError: Error, Sendable {
     case badDeviceToken
+    case deviceTokenNotForTopic
     case unregistered
 }
 
@@ -91,6 +92,7 @@ struct VaporAPNSSender: APNSSenderProtocol, @unchecked Sendable {
     private func classifyAPNSError(_ error: APNSError) -> any Error {
         // APNSError.ErrorReason has static properties conforming to Hashable — compare directly
         if error.reason == .badDeviceToken { return APNSTokenError.badDeviceToken }
+        if error.reason == .deviceTokenNotForTopic { return APNSTokenError.deviceTokenNotForTopic }
         if error.reason == .unregistered   { return APNSTokenError.unregistered }
         return error
     }

@@ -11,35 +11,41 @@ public func configure(_ app: Application) throws {
     app.http.server.configuration.hostname = "0.0.0.0"
     app.logger.logLevel = .info
 
-    // ─────────────  Amazon RDS (primary / legacy DB)  ─────────────
-    guard
+    var rdsConfigured = false
+    var legacyPostgresConfig: PostgresConfiguration?
+
+    // ─────────────  Amazon RDS (optional legacy fallback)  ─────────────
+    if
         let host = Environment.get("DATABASE_HOST"),
         let user = Environment.get("DATABASE_USERNAME"),
         let pass = Environment.get("DATABASE_PASSWORD"),
         let name = Environment.get("DATABASE_NAME")
-    else {
-        app.logger.critical("❌ Missing Amazon RDS environment variables (DATABASE_HOST/USERNAME/PASSWORD/NAME)")
-        throw Abort(.internalServerError)
+    {
+        var tlsConfig = TLSConfiguration.makeClientConfiguration()
+        tlsConfig.certificateVerification = .none   // ⚠️ Use .fullVerification in production
+
+        var postgresConfig = PostgresConfiguration(
+            hostname: host,
+            port: 5432,
+            username: user,
+            password: pass,
+            database: name
+        )
+        postgresConfig.tlsConfiguration = tlsConfig
+        legacyPostgresConfig = postgresConfig
+
+        app.databases.use(
+            .postgres(configuration: postgresConfig, maxConnectionsPerEventLoop: 4, connectionPoolTimeout: .seconds(20)),
+            as: .psql
+        )
+        rdsConfigured = true
+    } else {
+        app.logger.warning("⚠️ Amazon RDS env vars not set — legacy RDS fallback disabled")
     }
 
-    var tlsConfig = TLSConfiguration.makeClientConfiguration()
-    tlsConfig.certificateVerification = .none   // ⚠️ Use .fullVerification in production
+    var supabaseConfigured = false
 
-    var postgresConfig = PostgresConfiguration(
-        hostname: host,
-        port: 5432,
-        username: user,
-        password: pass,
-        database: name
-    )
-    postgresConfig.tlsConfiguration = tlsConfig
-
-    app.databases.use(
-        .postgres(configuration: postgresConfig, maxConnectionsPerEventLoop: 4, connectionPoolTimeout: .seconds(20)),
-        as: .psql
-    )
-
-    // ─────────────  Supabase Postgres (notification tables)  ─────────────
+    // ─────────────  Supabase Postgres (notification + analytics tables)  ─────────────
     if let supabaseURL = Environment.get("SUPABASE_DATABASE_URL") {
         do {
             var supabaseTLS = TLSConfiguration.makeClientConfiguration()
@@ -59,6 +65,7 @@ public func configure(_ app: Application) throws {
                 as: .notifications
             )
 
+            supabaseConfigured = true
             app.logger.info("✅ Supabase notifications DB configured")
         } catch {
             app.logger.error("❌ Failed to configure Supabase DB: \(error)")
@@ -66,42 +73,56 @@ public func configure(_ app: Application) throws {
                 throw error
             }
         }
+    } else if app.environment == .testing, let legacyPostgresConfig {
+        // Local/CI testing without a separate Supabase project:
+        // reuse the legacy Postgres connection so notification migrations/models still work.
+        app.databases.use(
+            .postgres(configuration: legacyPostgresConfig, maxConnectionsPerEventLoop: 2, connectionPoolTimeout: .seconds(20)),
+            as: .notifications
+        )
+        supabaseConfigured = true
+        app.logger.warning("⚠️ SUPABASE_DATABASE_URL not set — using legacy Postgres for .notifications in test mode")
     } else if app.environment == .production {
         app.logger.critical("❌ SUPABASE_DATABASE_URL is required in production")
         throw Abort(.internalServerError)
-    } else if app.environment == .testing {
-        // Fallback for local/CI testing without a separate Supabase project:
-        // reuse the Amazon RDS connection so notification migrations/models still work.
-        app.databases.use(
-            .postgres(configuration: postgresConfig, maxConnectionsPerEventLoop: 2, connectionPoolTimeout: .seconds(20)),
-            as: .notifications
-        )
-        app.logger.warning("⚠️ SUPABASE_DATABASE_URL not set — using Amazon RDS for .notifications in test mode")
     } else {
-        app.logger.warning("⚠️ SUPABASE_DATABASE_URL not set — Supabase notification features disabled in development")
+        app.logger.warning("⚠️ SUPABASE_DATABASE_URL not set — Supabase features disabled in development")
     }
 
-    // ─────────────  Amazon RDS Migrations  ─────────────
-    // Only legacy models target the .psql (Amazon) database.
-    // New notification models target .notifications (Supabase).
-    app.migrations.add(CreateTodo(), to: .psql)
-    app.migrations.add(CreateDevice(), to: .psql)
-    app.migrations.add(CreateCasePrepLog(), to: .psql)
+    let rdsMode: RDSMode = rdsConfigured ? .fallback : .disabled
+    app.storage[DatastoreConfigStorageKey.self] = DatastoreConfig(
+        supabaseConfigured: supabaseConfigured,
+        rdsConfigured: rdsConfigured,
+        rdsMode: rdsMode
+    )
+
+    app.logger.info(
+        """
+        [datastore] startup \
+        supabase_configured=\(supabaseConfigured ? "yes" : "no") \
+        rds_configured=\(rdsConfigured ? "yes" : "no") \
+        rds_mode=\(rdsMode.rawValue)
+        """
+    )
+
+    // ─────────────  Amazon RDS Migrations (legacy fallback only)  ─────────────
+    if rdsConfigured {
+        app.migrations.add(CreateDevice(), to: .psql)
+        app.migrations.add(CreateCasePrepLog(), to: .psql)
+    }
 
     // ─────────────  Supabase Notification Migrations  ─────────────
-    app.migrations.add(CreateUserDeviceTokens(), to: .notifications)
-    app.migrations.add(CreateNotificationPreferences(), to: .notifications)
-    app.migrations.add(CreateNotificationDeliveryAttempts(), to: .notifications)
-
-    // ─────────────  Phase 2A: Candidate/Scheduler Foundation  ─────────────
-    app.migrations.add(CreateNotificationCandidates(), to: .notifications)
-    app.migrations.add(CreateNotificationTemplates(), to: .notifications)
-    app.migrations.add(CreateNotificationInteractions(), to: .notifications)
-    app.migrations.add(CreateNotificationUserState(), to: .notifications)
-
-    // ─────────────  Phase 2B: Learning + First-BroBot-Try Candidates  ─────────────
-    app.migrations.add(AddNotificationTypeToCandidates(), to: .notifications)
-    app.migrations.add(AddGranularHoldoutColumns(), to: .notifications)
+    if supabaseConfigured {
+        app.migrations.add(CreateUserDeviceTokens(), to: .notifications)
+        app.migrations.add(CreateNotificationPreferences(), to: .notifications)
+        app.migrations.add(CreateNotificationDeliveryAttempts(), to: .notifications)
+        app.migrations.add(CreateNotificationCandidates(), to: .notifications)
+        app.migrations.add(CreateNotificationTemplates(), to: .notifications)
+        app.migrations.add(CreateNotificationInteractions(), to: .notifications)
+        app.migrations.add(CreateNotificationUserState(), to: .notifications)
+        app.migrations.add(AddNotificationTypeToCandidates(), to: .notifications)
+        app.migrations.add(AddGranularHoldoutColumns(), to: .notifications)
+    }
 
     try app.autoMigrate().wait()
 
@@ -124,7 +145,6 @@ public func configure(_ app: Application) throws {
     try app.configureSupabaseJWTVerifier()
 
     // ─────────────  APNS Configuration  ─────────────
-    // Production requires all APNS env vars. Dev/test may use documented defaults.
     let apnsKeyPath  = try ProductionEnvironment.value("APNS_KEY_PATH",  default: "/etc/apns/AuthKey_2V7UF5DPS4.p8", in: app)
     let apnsKeyId    = try ProductionEnvironment.value("APNS_KEY_ID",    default: "2V7UF5DPS4", in: app)
     let apnsTeamId   = try ProductionEnvironment.value("APNS_TEAM_ID",   default: "MLMGMULY2P", in: app)
@@ -133,6 +153,10 @@ public func configure(_ app: Application) throws {
 
     guard apnsEnvStr == "production" || apnsEnvStr == "sandbox" else {
         app.logger.critical("❌ APNS_ENVIRONMENT must be 'production' or 'sandbox'")
+        throw Abort(.internalServerError)
+    }
+    if app.environment == .production && apnsBundleId != "com.alexbaur.Snap-Ortho" {
+        app.logger.critical("❌ APNS_BUNDLE_ID does not match the production iOS app")
         throw Abort(.internalServerError)
     }
 
@@ -160,7 +184,7 @@ public func configure(_ app: Application) throws {
             requestEncoder: JSONEncoder(),
             as: .default
         )
-        app.logger.info("✅ APNS configured (environment=\(apnsEnvStr))")
+        app.logger.info("✅ APNS configured environment=\(apnsEnvStr) topic=\(apnsBundleId)")
     } catch {
         if app.environment == .production {
             app.logger.critical("❌ Failed to configure APNS: \(error)")
@@ -179,10 +203,6 @@ public func configure(_ app: Application) throws {
     app.asyncCommands.use(GenerateLearningCandidatesCommand(), as: GenerateLearningCandidatesCommand.name)
     app.asyncCommands.use(ProcessScheduledNotificationsCommand(), as: ProcessScheduledNotificationsCommand.name)
 
-    // ─────────────  Phase 2A: Candidate Scheduler  ─────────────
-    // No-op generation/dispatch in Phase 2A — only validates the recurring loop itself
-    // (counts pending candidates, rolls over daily/weekly send counters). Phase 2B+ adds
-    // real candidate generation and dispatch on top of this same job.
     app.lifecycle.use(CandidateSchedulerJob())
 
     // ─────────────  CORS  ─────────────

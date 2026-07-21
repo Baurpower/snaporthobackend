@@ -104,7 +104,6 @@ struct NotificationService: Sendable {
     // MARK: - Send to a single registered device (admin test / targeted send)
 
     /// Looks up a device by raw token + environment, logs delivery, sends APNS, and invalidates bad tokens.
-    /// `allowCrossEnvironment` lets admin test sends target a device registered under a different APNS environment.
     func sendToDevice(
         rawToken: String,
         environment: String,
@@ -114,7 +113,6 @@ struct NotificationService: Sendable {
         body: String,
         deeplink: String? = nil,
         metadata: [String: String] = [:],
-        allowCrossEnvironment: Bool = false,
         db: any Database
     ) async throws -> NotificationBroadcastResult {
         let tokenHash = UserDeviceToken.hash(rawToken)
@@ -129,6 +127,14 @@ struct NotificationService: Sendable {
         guard device.isActive else {
             throw Abort(.conflict, reason: "Device token has been invalidated")
         }
+        guard device.receiveNotifications else {
+            throw Abort(.conflict, reason: "Device has notifications disabled")
+        }
+        guard device.environment == apnsEnvironment else {
+            throw Abort(.conflict, reason: "Device environment does not match this server's APNS endpoint")
+        }
+
+        logger.info("notification_presend target_count=1 token_hash=\(UserDeviceToken.logSafePrefix(of: device.tokenHash)) environment=\(device.environment) topic=\(bundleId)")
 
         return try await dispatch(
             to: [device],
@@ -139,7 +145,6 @@ struct NotificationService: Sendable {
             body: body,
             deeplink: deeplink,
             metadata: metadata,
-            enforceServerEnvironment: !allowCrossEnvironment,
             db: db
         )
     }
@@ -335,7 +340,9 @@ struct NotificationService: Sendable {
                 logger.info("✅ Sent \(notificationType) → \(UserDeviceToken.logSafePrefix(of: device.tokenHash))")
                 sent += 1
 
-            } catch APNSTokenError.badDeviceToken, APNSTokenError.unregistered {
+            } catch APNSTokenError.badDeviceToken,
+                    APNSTokenError.deviceTokenNotForTopic,
+                    APNSTokenError.unregistered {
                 // Permanent failure — invalidate the token so it won't be retried
                 logger.warning("⚠️ Token permanently invalid, invalidating: \(UserDeviceToken.logSafePrefix(of: device.tokenHash))")
                 device.invalidatedAt = Date()
