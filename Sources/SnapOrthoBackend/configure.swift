@@ -6,6 +6,7 @@ import NIOCore
 import APNS
 import VaporAPNS
 import APNSCore
+import Crypto
 
 public func configure(_ app: Application) throws {
     app.http.server.configuration.hostname = "0.0.0.0"
@@ -145,14 +146,21 @@ public func configure(_ app: Application) throws {
     try app.configureSupabaseJWTVerifier()
 
     // ─────────────  APNS Configuration  ─────────────
-    let apnsKeyPath  = try ProductionEnvironment.value("APNS_KEY_PATH",  default: "/etc/apns/AuthKey_2V7UF5DPS4.p8", in: app)
+    //
+    // Credentials are shared across sandbox + production. Endpoint selection is
+    // explicit via separate named VaporAPNS containers (.production / .development).
+    // Device rows store "sandbox" | "production"; send paths pick the matching client.
+    //
+    // APNS_ENVIRONMENT remains the default/primary environment for ops defaults.
+    // Never print the private key or raw device tokens.
+
     let apnsKeyId    = try ProductionEnvironment.value("APNS_KEY_ID",    default: "2V7UF5DPS4", in: app)
     let apnsTeamId   = try ProductionEnvironment.value("APNS_TEAM_ID",   default: "MLMGMULY2P", in: app)
     let apnsEnvStr   = try ProductionEnvironment.value("APNS_ENVIRONMENT", default: "production", in: app)
     let apnsBundleId = try ProductionEnvironment.value("APNS_BUNDLE_ID", default: "com.alexbaur.Snap-Ortho", in: app)
 
-    guard apnsEnvStr == "production" || apnsEnvStr == "sandbox" else {
-        app.logger.critical("❌ APNS_ENVIRONMENT must be 'production' or 'sandbox'")
+    guard let defaultDeviceEnv = APNSDeviceEnvironment.parse(apnsEnvStr) else {
+        app.logger.critical("❌ APNS_ENVIRONMENT must be 'production' or 'sandbox' (got non-empty invalid value)")
         throw Abort(.internalServerError)
     }
     if app.environment == .production && apnsBundleId != "com.alexbaur.Snap-Ortho" {
@@ -160,39 +168,82 @@ public func configure(_ app: Application) throws {
         throw Abort(.internalServerError)
     }
 
-    let apnsEnvironment: APNSEnvironment = apnsEnvStr == "sandbox" ? .sandbox : .production
-    app.storage[APNSRuntimeConfigStorageKey.self] = APNSRuntimeConfig(
-        bundleId: apnsBundleId,
-        environment: apnsEnvStr
-    )
+    var configuredEnvironments: Set<String> = []
 
     do {
-        let keyContent = try String(contentsOfFile: apnsKeyPath)
-        let apnsConfig = try APNSClientConfiguration(
+        let keyContent = try APNSKeyMaterial.loadPEM(from: app)
+        // P256.Signing.PrivateKey.loadFrom is provided by APNSwift
+        let privateKey = try P256.Signing.PrivateKey.loadFrom(string: keyContent)
+
+        // Production client
+        let productionConfig = APNSClientConfiguration(
             authenticationMethod: .jwt(
-                privateKey: try .loadFrom(string: keyContent),
+                privateKey: privateKey,
                 keyIdentifier: apnsKeyId,
                 teamIdentifier: apnsTeamId
             ),
-            environment: apnsEnvironment
+            environment: .production
         )
-
         app.apns.containers.use(
-            apnsConfig,
+            productionConfig,
             eventLoopGroupProvider: .shared(app.eventLoopGroup),
             responseDecoder: JSONDecoder(),
             requestEncoder: JSONEncoder(),
-            as: .default
+            as: .production,
+            isDefault: defaultDeviceEnv == .production
         )
-        app.logger.info("✅ APNS configured environment=\(apnsEnvStr) topic=\(apnsBundleId)")
+        configuredEnvironments.insert(APNSDeviceEnvironment.production.rawValue)
+
+        // Sandbox / development client (same signing credentials, different host)
+        let sandboxConfig = APNSClientConfiguration(
+            authenticationMethod: .jwt(
+                privateKey: privateKey,
+                keyIdentifier: apnsKeyId,
+                teamIdentifier: apnsTeamId
+            ),
+            environment: .development
+        )
+        app.apns.containers.use(
+            sandboxConfig,
+            eventLoopGroupProvider: .shared(app.eventLoopGroup),
+            responseDecoder: JSONDecoder(),
+            requestEncoder: JSONEncoder(),
+            as: .development,
+            isDefault: defaultDeviceEnv == .sandbox
+        )
+        configuredEnvironments.insert(APNSDeviceEnvironment.sandbox.rawValue)
+
+        // Keep .default as an alias of the primary environment for any legacy call sites
+        // that still use application.apns.client without an explicit container ID.
+        let defaultConfig = defaultDeviceEnv == .sandbox ? sandboxConfig : productionConfig
+        app.apns.containers.use(
+            defaultConfig,
+            eventLoopGroupProvider: .shared(app.eventLoopGroup),
+            responseDecoder: JSONDecoder(),
+            requestEncoder: JSONEncoder(),
+            as: .default,
+            isDefault: false
+        )
+
+        app.logger.info(
+            "✅ APNS configured default=\(defaultDeviceEnv.rawValue) configured=[\(configuredEnvironments.sorted().joined(separator: ","))] topic=\(apnsBundleId) team_id_set=yes key_id_set=yes"
+        )
     } catch {
         if app.environment == .production {
             app.logger.critical("❌ Failed to configure APNS: \(error)")
             throw error
         } else {
-            app.logger.warning("⚠️ APNS not configured (key file missing or invalid) — push sends will fail: \(error)")
+            // Dev/test may boot without a key; mark default env as "configured" for mock-based tests.
+            configuredEnvironments = [defaultDeviceEnv.rawValue, APNSDeviceEnvironment.sandbox.rawValue, APNSDeviceEnvironment.production.rawValue]
+            app.logger.warning("⚠️ APNS clients not fully configured (key missing/invalid) — live pushes will fail: \(error)")
         }
     }
+
+    app.storage[APNSRuntimeConfigStorageKey.self] = APNSRuntimeConfig(
+        bundleId: apnsBundleId,
+        defaultEnvironment: defaultDeviceEnv.rawValue,
+        configuredEnvironments: configuredEnvironments
+    )
 
     // ─────────────  Notification Service  ─────────────
     app.configureNotificationService()

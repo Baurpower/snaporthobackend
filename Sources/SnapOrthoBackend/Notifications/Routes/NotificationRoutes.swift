@@ -8,7 +8,7 @@ struct RegisterDeviceRequest: Content {
     let platform: String?
     let appVersion: String?
     let buildNumber: String?
-    let environment: String?   // "production" | "sandbox" — defaults to "production"
+    let environment: String?   // "production" | "sandbox" — optional for legacy callers
     let timezone: String?
     let receiveNotifications: Bool?
 
@@ -19,7 +19,7 @@ struct RegisterDeviceRequest: Content {
 
 struct DeregisterDeviceRequest: Content {
     let deviceToken: String
-    let environment: String?   // defaults to "production"
+    let environment: String?   // required for unambiguous invalidation; defaults rejected if ambiguous
 }
 
 struct UpdatePreferencesRequest: Content {
@@ -41,29 +41,39 @@ struct AdminBroadcastRequest: Content {
     let inactiveDaysOnly: Int?  // if set, only send to users inactive for N+ days
 }
 
+/// Legacy admin test: requires exact raw token + environment.
 struct AdminTestPushRequest: Content {
     let deviceToken: String
     let environment: String
     let title: String?
     let body: String?
+    let deeplink: String?
+}
+
+/// Exact-device admin test: requires registration UUID (preferred).
+struct AdminExactPushTestRequest: Content {
+    let registrationId: UUID?
+    let title: String?
+    let body: String?
+    let deeplink: String?
+}
+
+struct MaskedRegistrationsListResponse: Content {
+    let count: Int
+    let topic: String
+    let configuredEnvironments: [String]
+    let registrations: [MaskedDeviceRegistrationDTO]
 }
 
 // MARK: - Route registration
 
 func registerNotificationRoutes(_ app: Application) throws {
 
-    // ───────── Device registration (dual-write) ─────────
-
-    // This replaces the existing POST /device/register handler in routes.swift.
-    // The old handler is kept in routes.swift as a deprecated compatibility wrapper
-    // that calls this logic. This function is the canonical implementation.
-
     // ───────── DELETE /notifications/device-token ─────────
     app.delete("notifications", "device-token") { req async throws -> HTTPStatus in
         let payload = try req.content.decode(DeregisterDeviceRequest.self)
         let tokenHash = UserDeviceToken.hash(payload.deviceToken)
-        let environment = payload.environment ?? "production"
-        guard environment == "production" || environment == "sandbox" else {
+        guard let environment = payload.environment.flatMap({ APNSDeviceEnvironment.parse($0)?.rawValue }) else {
             throw Abort(.badRequest, reason: "environment must be 'production' or 'sandbox'")
         }
 
@@ -76,7 +86,7 @@ func registerNotificationRoutes(_ app: Application) throws {
         if let device = device, device.invalidatedAt == nil {
             device.invalidatedAt = Date()
             try await device.update(on: db)
-            req.logger.info("🗑 Deregistered device token_hash=\(tokenHash.prefix(12))")
+            req.logger.info("🗑 Deregistered device token_hash=\(tokenHash.prefix(12)) env=\(environment)")
         }
 
         return .ok  // idempotent — success even if already invalidated or not found
@@ -117,7 +127,6 @@ func registerNotificationRoutes(_ app: Application) throws {
         let db = req.db(.notifications)
 
         for change in update.preferences {
-            // Validate category
             guard NotificationCategory(rawValue: change.category) != nil else {
                 throw Abort(.badRequest, reason: "Unknown notification category: \(change.category)")
             }
@@ -139,7 +148,6 @@ func registerNotificationRoutes(_ app: Application) throws {
             }
         }
 
-        // Return full updated state
         let all = try await NotificationPreference.query(on: db)
             .filter(\.$userId == userID)
             .all()
@@ -149,18 +157,74 @@ func registerNotificationRoutes(_ app: Application) throws {
     // ───────── Admin routes (require X-Admin-Key) ─────────
     let admin = app.grouped(AdminAuthMiddleware())
 
+    // GET /admin/notifications/registrations
+    // Safe listing of candidate devices — never exposes complete tokens.
+    admin.get("admin", "notifications", "registrations") { req async throws -> MaskedRegistrationsListResponse in
+        let environment = try? req.query.get(String.self, at: "environment")
+        let userIdString = try? req.query.get(String.self, at: "userId")
+        let userId = userIdString.flatMap(UUID.init(uuidString:))
+        let enabledOnly = (try? req.query.get(Bool.self, at: "enabledOnly")) ?? true
+        let limit = (try? req.query.get(Int.self, at: "limit")) ?? 50
+
+        let svc = req.application.notificationService
+        let registrations = try await svc.listMaskedRegistrations(
+            environment: environment,
+            userId: userId,
+            enabledOnly: enabledOnly,
+            limit: limit,
+            db: req.db(.notifications)
+        )
+
+        return MaskedRegistrationsListResponse(
+            count: registrations.count,
+            topic: svc.bundleId,
+            configuredEnvironments: svc.configuredEnvironments.sorted(),
+            registrations: registrations
+        )
+    }
+
+    // POST /admin/push/test  (preferred exact-registration contract)
+    admin.post("admin", "push", "test") { req async throws -> ExactDevicePushResult in
+        try await handleExactDeviceTest(req)
+    }
+
     // POST /admin/notifications/test
-    admin.post("admin", "notifications", "test") { req async throws -> NotificationBroadcastResult in
+    // Accepts either:
+    //   { "registrationId": "..." }  — preferred exact-device path
+    //   { "deviceToken": "...", "environment": "..." }  — legacy path
+    admin.post("admin", "notifications", "test") { req async throws -> Response in
+        // Try exact registration path first
+        if let exact = try? req.content.decode(AdminExactPushTestRequest.self),
+           let registrationId = exact.registrationId {
+            let result = try await req.application.notificationService.sendToRegistration(
+                registrationId: registrationId,
+                category: .system,
+                notificationType: "admin.test",
+                title: exact.title ?? "SnapOrtho Test",
+                body: exact.body ?? "APNs test notification",
+                deeplink: exact.deeplink ?? "snaportho://notifications/test",
+                db: req.db(.notifications)
+            )
+            if !result.success {
+                // Still return structured body so operators can inspect status without
+                // guessing; use 409 for permanent token disable, 502 for other failures.
+                let status: HTTPStatus = result.registrationDisabled ? .gone : .badGateway
+                return try await result.encodeResponse(status: status, for: req)
+            }
+            return try await result.encodeResponse(status: .ok, for: req)
+        }
+
+        // Legacy: exact raw token + environment
         let payload = try req.content.decode(AdminTestPushRequest.self)
-        let environment = payload.environment
-        guard environment == "production" || environment == "sandbox" else {
+        guard let environment = APNSDeviceEnvironment.parse(payload.environment)?.rawValue else {
             throw Abort(.badRequest, reason: "environment must be 'production' or 'sandbox'")
         }
-        guard environment == req.application.notificationService.apnsEnvironment else {
-            throw Abort(.conflict, reason: "Requested environment does not match this server's APNS endpoint")
+        guard req.application.notificationService.configuredEnvironments.contains(environment) else {
+            throw Abort(.conflict, reason: "Requested environment does not match a configured APNS endpoint")
         }
         let title = payload.title ?? "SnapOrtho Test"
         let body = payload.body ?? "Push notification test 🩻"
+        let deeplink = payload.deeplink ?? "snaportho://notifications/test"
 
         let svc = req.application.notificationService
         let result = try await svc.sendToDevice(
@@ -170,18 +234,20 @@ func registerNotificationRoutes(_ app: Application) throws {
             notificationType: "admin.test",
             title: title,
             body: body,
+            deeplink: deeplink,
             db: req.db(.notifications)
         )
 
         let tokenHash = UserDeviceToken.hash(payload.deviceToken)
         if result.sent == 1 {
-            req.logger.info("✅ Admin test push sent to token_hash=\(tokenHash.prefix(12))")
+            req.logger.info("✅ Admin test push sent to token_hash=\(tokenHash.prefix(12)) env=\(environment)")
+            return try await result.encodeResponse(status: .ok, for: req)
         } else if result.failed == 1 {
             throw Abort(.gone, reason: "Token is invalid or unregistered — it has been invalidated")
         } else if result.skipped == 1 {
             throw Abort(.conflict, reason: "Device token could not be sent (skipped)")
         }
-        return result
+        return try await result.encodeResponse(status: .ok, for: req)
     }
 
     // POST /admin/notifications/broadcast
@@ -220,6 +286,50 @@ func registerNotificationRoutes(_ app: Application) throws {
     }
 }
 
+// MARK: - Exact device test handler
+
+private func handleExactDeviceTest(_ req: Request) async throws -> ExactDevicePushResult {
+    let payload = try req.content.decode(AdminExactPushTestRequest.self)
+
+    guard let registrationId = payload.registrationId else {
+        throw Abort(.badRequest, reason: "registrationId is required — never falls back to another device")
+    }
+
+    let result = try await req.application.notificationService.sendToRegistration(
+        registrationId: registrationId,
+        category: .system,
+        notificationType: "admin.test",
+        title: payload.title ?? "SnapOrtho Test",
+        body: payload.body ?? "APNs test notification",
+        deeplink: payload.deeplink ?? "snaportho://notifications/test",
+        db: req.db(.notifications)
+    )
+
+    if result.success {
+        req.logger.info(
+            "✅ Admin exact-device test accepted registration_id=\(registrationId) env=\(result.environment) apns_id=\(result.apnsId ?? "nil")"
+        )
+    } else {
+        req.logger.warning(
+            "⚠️ Admin exact-device test failed registration_id=\(registrationId) status=\(result.status) error=\(result.errorCode ?? "nil") disabled=\(result.registrationDisabled)"
+        )
+    }
+
+    // Throw HTTP errors for hard failures while still allowing the caller to
+    // decode a body when using the structured success path above.
+    if !result.success {
+        if result.registrationDisabled {
+            throw Abort(.gone, reason: result.errorMessage ?? "Registration permanently invalid and disabled")
+        }
+        if result.status == "skipped" {
+            throw Abort(.conflict, reason: result.errorMessage ?? "Send skipped")
+        }
+        throw Abort(.badGateway, reason: result.errorMessage ?? "APNs delivery failed")
+    }
+
+    return result
+}
+
 // MARK: - Dual-write device registration helper
 
 /// Called from POST /device/register to write into Supabase (primary datastore).
@@ -241,6 +351,9 @@ func upsertSupabaseDeviceToken(
           normalizedToken.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "0123456789abcdef").contains($0) }) else {
         throw Abort(.badRequest, reason: "deviceToken must be a 64-character hexadecimal APNS token")
     }
+    guard APNSDeviceEnvironment.parse(environment) != nil else {
+        throw Abort(.badRequest, reason: "environment must be 'production' or 'sandbox'")
+    }
     let tokenHash = UserDeviceToken.hash(normalizedToken)
     let now = Date()
 
@@ -249,7 +362,11 @@ func upsertSupabaseDeviceToken(
         .filter(\.$environment == environment)
         .first()
     {
-        // Update in place — preserve invalidation state if already marked
+        // Ownership rules:
+        // - Authenticated registration always reassigns the device to that user.
+        // - Anonymous registration clears user association (logout / pre-auth path)
+        //   so the device is not left attached to a prior account.
+        // - Never merge sandbox into production or vice versa (unique on hash+env).
         existing.userId = userID
         existing.token = normalizedToken
         existing.platform = platform
@@ -258,10 +375,12 @@ func upsertSupabaseDeviceToken(
         existing.timezone = timezone
         existing.receiveNotifications = receiveNotifications
         existing.lastSeenAt = now
-        // Re-activate if app registered again (user re-installed)
+        // Re-activate if app registered again (user re-installed or token recovered)
         existing.invalidatedAt = nil
         try await existing.update(on: db)
-        logger.info("♻️ [datastore] primary=supabase device_upsert=update token_hash=\(tokenHash.prefix(12))")
+        logger.info(
+            "♻️ [datastore] primary=supabase device_upsert=update token_hash=\(tokenHash.prefix(12)) env=\(environment) user=\(userID?.uuidString.prefix(8) ?? "anonymous")"
+        )
     } else {
         let device = UserDeviceToken(
             userId: userID,
@@ -275,6 +394,8 @@ func upsertSupabaseDeviceToken(
             lastSeenAt: now
         )
         try await device.create(on: db)
-        logger.info("🆕 [datastore] primary=supabase device_upsert=create token_hash=\(tokenHash.prefix(12))")
+        logger.info(
+            "🆕 [datastore] primary=supabase device_upsert=create token_hash=\(tokenHash.prefix(12)) env=\(environment) user=\(userID?.uuidString.prefix(8) ?? "anonymous")"
+        )
     }
 }

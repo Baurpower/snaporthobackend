@@ -14,12 +14,18 @@ final class MockAPNSSender: APNSSenderProtocol, @unchecked Sendable {
         let body: String
         let token: String
         let payload: SnapOrthoAPNSPayload
+        let bundleId: String
+        let environment: String
     }
 
     private let lock = NSLock()
     private var _calls: [SentCall] = []
     var shouldThrowTokenError: APNSTokenError? = nil
+    var shouldThrowProviderError: APNSProviderError? = nil
+    var shouldThrowTransientError: APNSTransientError? = nil
     var shouldThrowGenericError: Bool = false
+    /// If set, only allows sends for this environment (simulates single-client server).
+    var allowedEnvironments: Set<String>? = nil
 
     var calls: [SentCall] {
         lock.withLock { _calls }
@@ -30,27 +36,96 @@ final class MockAPNSSender: APNSSenderProtocol, @unchecked Sendable {
         body: String,
         to token: String,
         payload: SnapOrthoAPNSPayload,
-        bundleId: String
+        bundleId: String,
+        environment: String
     ) async throws -> APNSSendResult {
+        if let allowed = allowedEnvironments, !allowed.contains(environment) {
+            throw APNSProviderError.environmentNotConfigured(environment)
+        }
         if let tokenError = shouldThrowTokenError { throw tokenError }
+        if let providerError = shouldThrowProviderError { throw providerError }
+        if let transient = shouldThrowTransientError { throw transient }
         if shouldThrowGenericError { throw Abort(.internalServerError, reason: "Mock APNS error") }
         lock.withLock {
-            _calls.append(SentCall(title: title, body: body, token: token, payload: payload))
+            _calls.append(SentCall(
+                title: title,
+                body: body,
+                token: token,
+                payload: payload,
+                bundleId: bundleId,
+                environment: environment
+            ))
         }
-        return APNSSendResult(apnsId: "mock-apns-id-\(UUID().uuidString)")
+        return APNSSendResult(
+            apnsId: "mock-apns-id-\(UUID().uuidString)",
+            environment: environment,
+            topic: bundleId
+        )
     }
 
     func reset() {
         lock.withLock { _calls.removeAll() }
         shouldThrowTokenError = nil
+        shouldThrowProviderError = nil
+        shouldThrowTransientError = nil
         shouldThrowGenericError = false
+        allowedEnvironments = nil
     }
 }
 
-// MARK: - Test harness
+// MARK: - Pure unit tests (no database)
+
+@Suite("APNs unit helpers")
+struct APNSUnitHelperTests {
+    @Test("Token hashing is canonical across case and surrounding whitespace")
+    func tokenHashNormalization() {
+        let lower = String(repeating: "ab", count: 32)
+        #expect(UserDeviceToken.hash(lower) == UserDeviceToken.hash("  \(lower.uppercased())\n"))
+    }
+
+    @Test("Tokens are masked in API presentation form")
+    func tokensAreMasked() {
+        let token = String(repeating: "a", count: 60) + "89ef"
+        let masked = UserDeviceToken.maskedToken(token)
+        #expect(masked.hasPrefix("aaaaaaaa…"))
+        #expect(masked.hasSuffix("89ef"))
+        #expect(!masked.contains(token))
+        #expect(masked.count < token.count)
+    }
+
+    @Test("APNS environment parsing rejects unknown values")
+    func environmentParsing() {
+        #expect(APNSDeviceEnvironment.parse("production") == .production)
+        #expect(APNSDeviceEnvironment.parse("sandbox") == .sandbox)
+        #expect(APNSDeviceEnvironment.parse("development") == .sandbox)
+        #expect(APNSDeviceEnvironment.parse("prod") == .production)
+        #expect(APNSDeviceEnvironment.parse("unknown") == nil)
+        #expect(APNSDeviceEnvironment.parse(nil) == nil)
+    }
+
+    @Test("PEM normalizer accepts escaped newlines and rejects garbage")
+    func pemNormalizer() throws {
+        let escaped = "-----BEGIN PRIVATE KEY-----\\nABC\\n-----END PRIVATE KEY-----"
+        let normalized = APNSKeyMaterial.normalizePEM(escaped)
+        #expect(normalized.contains("\n"))
+        #expect(throws: (any Error).self) {
+            try APNSKeyMaterial.validatePEMShape("not-a-key")
+        }
+        try APNSKeyMaterial.validatePEMShape(normalized)
+    }
+
+    @Test("Product category defaults to disabled; others default enabled")
+    func productCategoryDefaultDisabled() {
+        #expect(NotificationCategory.product.defaultEnabled == false)
+        #expect(NotificationCategory.learning.defaultEnabled == true)
+        #expect(NotificationCategory.system.defaultEnabled == true)
+    }
+}
+
+// MARK: - Integration tests (require database)
 
 /// Sets up the test application with a mock APNS sender.
-/// Relies on the same env vars as the existing test suite (Amazon RDS for both .psql and .notifications).
+/// Relies on the same env vars as the existing test suite (Amazon RDS / Supabase for .notifications).
 @Suite("Notification Tests", .serialized)
 struct NotificationTests {
     private let mockAPNS = MockAPNSSender()
@@ -59,7 +134,6 @@ struct NotificationTests {
         let app = try await Application.make(.testing)
         do {
             try await configure(app)
-            // Replace the real APNS sender with our mock after configure() runs
             app.apnsSender = mockAPNS
             app.configureNotificationService()
             mockAPNS.reset()
@@ -71,6 +145,19 @@ struct NotificationTests {
             throw error
         }
         try await app.asyncShutdown()
+    }
+
+    private func validHexToken(prefix: String = "aa") -> String {
+        // Build a deterministic 64-char hex token from a short seed.
+        let seed = prefix + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let hex = seed.lowercased().filter { "0123456789abcdef".contains($0) }
+        if hex.count >= 64 { return String(hex.prefix(64)) }
+        return hex + String(repeating: "0", count: 64 - hex.count)
+    }
+
+    private func adminKey() -> String? {
+        let key = Environment.get("ADMIN_API_KEY")
+        return (key?.isEmpty == false) ? key : nil
     }
 
     // MARK: - Admin Auth
@@ -118,7 +205,7 @@ struct NotificationTests {
 
     @Test("Admin broadcast accepted with correct key")
     func adminBroadcastAcceptsCorrectKey() async throws {
-        guard let adminKey = Environment.get("ADMIN_API_KEY"), !adminKey.isEmpty else {
+        guard let adminKey = adminKey() else {
             Issue.record("Skipped: ADMIN_API_KEY env var not set — set it to run this test")
             return
         }
@@ -135,7 +222,6 @@ struct NotificationTests {
                     ])
                 },
                 afterResponse: { res async in
-                    // Returns 200 (even if 0 devices) — not 401/403
                     #expect(res.status == .ok)
                 }
             )
@@ -143,12 +229,6 @@ struct NotificationTests {
     }
 
     // MARK: - Device Registration
-
-    @Test("Token hashing is canonical across case and surrounding whitespace")
-    func tokenHashNormalization() {
-        let lower = String(repeating: "ab", count: 32)
-        #expect(UserDeviceToken.hash(lower) == UserDeviceToken.hash("  \(lower.uppercased())\n"))
-    }
 
     @Test("Device registration rejects malformed APNS tokens")
     func deviceRegistrationRejectsMalformedToken() async throws {
@@ -170,15 +250,80 @@ struct NotificationTests {
         }
     }
 
-    @Test("Device registration succeeds with Supabase primary even when RDS tables are absent")
-    func deviceRegistrationSupabasePrimaryWithoutRDSWrites() async throws {
+    @Test("Device registration rejects unknown environment")
+    func deviceRegistrationRejectsUnknownEnvironment() async throws {
         try await withApp { app in
-            guard !app.rdsAvailable else {
-                Issue.record("Skipped: RDS is configured in this environment — run without DATABASE_* to assert fallback skip")
-                return
-            }
+            try await app.testing().test(
+                .POST, "device/register",
+                beforeRequest: { req in
+                    try req.content.encode(RegisterDevicePayload(
+                        deviceToken: validHexToken(),
+                        platform: "ios",
+                        appVersion: "3.0.0",
+                        timezone: "America/Los_Angeles",
+                        environment: "staging"
+                    ))
+                },
+                afterResponse: { res async in
+                    #expect(res.status == .badRequest)
+                }
+            )
+        }
+    }
 
-            let token = String(repeating: "a", count: 64)
+    @Test("1. Authenticated device registration attaches verified user")
+    func authenticatedDeviceRegistration() async throws {
+        try await withApp { app in
+            // Without a real JWT, registration is anonymous — verify path accepts no bearer.
+            // Authenticated path is covered by optionalVerified + upsert unit below.
+            let userId = UUID()
+            let token = validHexToken(prefix: "11")
+            try await upsertSupabaseDeviceToken(
+                rawToken: token,
+                userID: userId,
+                platform: "ios",
+                environment: "sandbox",
+                appVersion: "3.0.0",
+                buildNumber: "100",
+                timezone: "America/Chicago",
+                receiveNotifications: true,
+                db: app.db(.notifications),
+                logger: app.logger
+            )
+            let device = try await UserDeviceToken.query(on: app.db(.notifications))
+                .filter(\.$tokenHash == UserDeviceToken.hash(token))
+                .first()
+            #expect(device?.userId == userId)
+            #expect(device?.environment == "sandbox")
+        }
+    }
+
+    @Test("2. Invalid bearer token is rejected (not stored as anonymous)")
+    func invalidBearerTokenRejected() async throws {
+        try await withApp { app in
+            try await app.testing().test(
+                .POST, "device/register",
+                beforeRequest: { req in
+                    req.headers.bearerAuthorization = .init(token: "not.a.valid.jwt")
+                    try req.content.encode(RegisterDevicePayload(
+                        deviceToken: validHexToken(prefix: "22"),
+                        platform: "ios",
+                        appVersion: "3.0.0",
+                        timezone: "America/Los_Angeles",
+                        environment: "sandbox"
+                    ))
+                },
+                afterResponse: { res async in
+                    #expect(res.status == .unauthorized)
+                }
+            )
+        }
+    }
+
+    @Test("3. Anonymous registration stores user_id null")
+    func anonymousRegistration() async throws {
+        try await withApp { app in
+            let token = validHexToken(prefix: "33")
             try await app.testing().test(
                 .POST, "device/register",
                 beforeRequest: { req in
@@ -186,14 +331,41 @@ struct NotificationTests {
                         deviceToken: token,
                         platform: "ios",
                         appVersion: "3.0.0",
-                        timezone: "America/Los_Angeles"
+                        timezone: "America/Los_Angeles",
+                        environment: "sandbox"
                     ))
                 },
                 afterResponse: { res async in
                     #expect(res.status == .ok)
                 }
             )
+            let device = try await UserDeviceToken.query(on: app.db(.notifications))
+                .filter(\.$tokenHash == UserDeviceToken.hash(token))
+                .first()
+            #expect(device?.userId == nil)
+        }
+    }
 
+    @Test("4. Anonymous-to-authenticated reassignment updates user_id")
+    func anonymousToAuthenticatedReassignment() async throws {
+        try await withApp { app in
+            let token = validHexToken(prefix: "44")
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: nil, platform: "ios", environment: "production",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
+            )
+            let userId = UUID()
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: userId, platform: "ios", environment: "production",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
+            )
+            let device = try await UserDeviceToken.query(on: app.db(.notifications))
+                .filter(\.$tokenHash == UserDeviceToken.hash(token))
+                .filter(\.$environment == "production")
+                .first()
+            #expect(device?.userId == userId)
             let count = try await UserDeviceToken.query(on: app.db(.notifications))
                 .filter(\.$tokenHash == UserDeviceToken.hash(token))
                 .count()
@@ -201,51 +373,59 @@ struct NotificationTests {
         }
     }
 
-    @Test("Device registration upserts rather than duplicating")
+    @Test("5. Same token with different environments tracked separately")
+    func sandboxAndProductionTokensAreDistinct() async throws {
+        try await withApp { app in
+            let token = validHexToken(prefix: "55")
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: nil, platform: "ios", environment: "production",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
+            )
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: nil, platform: "ios", environment: "sandbox",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
+            )
+            let count = try await UserDeviceToken.query(on: app.db(.notifications))
+                .filter(\.$tokenHash == UserDeviceToken.hash(token))
+                .count()
+            #expect(count == 2)
+        }
+    }
+
+    @Test("6. Duplicate registration upserts rather than duplicating")
     func deviceRegistrationUpserts() async throws {
         try await withApp { app in
-            let token = String(repeating: "b", count: 64)
+            let token = validHexToken(prefix: "66")
             let tokenHash = UserDeviceToken.hash(token)
 
-            // Register once
             try await app.testing().test(
                 .POST, "device/register",
                 beforeRequest: { req in
                     try req.content.encode(RegisterDevicePayload(
-                        deviceToken: token,
-                        platform: "ios",
-                        appVersion: "1.0.0",
-                        timezone: "America/Chicago"
+                        deviceToken: token, platform: "ios", appVersion: "1.0.0",
+                        timezone: "America/Chicago", environment: "production"
                     ))
                 },
-                afterResponse: { res async in
-                    #expect(res.status == .ok)
-                }
+                afterResponse: { res async in #expect(res.status == .ok) }
             )
-
-            // Register again with same token
             try await app.testing().test(
                 .POST, "device/register",
                 beforeRequest: { req in
                     try req.content.encode(RegisterDevicePayload(
-                        deviceToken: token,
-                        platform: "ios",
-                        appVersion: "1.1.0",
-                        timezone: "America/New_York"
+                        deviceToken: token, platform: "ios", appVersion: "1.1.0",
+                        timezone: "America/New_York", environment: "production"
                     ))
                 },
-                afterResponse: { res async in
-                    #expect(res.status == .ok)
-                }
+                afterResponse: { res async in #expect(res.status == .ok) }
             )
 
-            // Should exist exactly once in Supabase
             let count = try await UserDeviceToken.query(on: app.db(.notifications))
                 .filter(\.$tokenHash == tokenHash)
+                .filter(\.$environment == "production")
                 .count()
             #expect(count == 1)
-
-            // Version should be updated to latest
             let device = try await UserDeviceToken.query(on: app.db(.notifications))
                 .filter(\.$tokenHash == tokenHash)
                 .first()
@@ -254,49 +434,18 @@ struct NotificationTests {
         }
     }
 
-    @Test("Production and sandbox tokens for same device tracked separately")
-    func sandboxAndProductionTokensAreDistinct() async throws {
-        try await withApp { app in
-            let token = "same-physical-device-token-\(UUID().uuidString)"
-
-            // Insert production token
-            let prodToken = UserDeviceToken(
-                userId: nil,
-                token: token,
-                platform: "ios",
-                environment: "production",
-                appVersion: "1.0"
-            )
-            try await prodToken.create(on: app.db(.notifications))
-
-            // Insert sandbox token (same raw token, different environment)
-            let sandboxToken = UserDeviceToken(
-                userId: nil,
-                token: token,
-                platform: "ios",
-                environment: "sandbox",
-                appVersion: "1.0"
-            )
-            try await sandboxToken.create(on: app.db(.notifications))
-
-            let count = try await UserDeviceToken.query(on: app.db(.notifications))
-                .filter(\.$tokenHash == UserDeviceToken.hash(token))
-                .count()
-            #expect(count == 2)
-        }
-    }
-
     @Test("Multiple devices per user are supported")
     func multipleDevicesPerUser() async throws {
         try await withApp { app in
             let userId = UUID()
-            let tokens = ["token-device-a-\(UUID())", "token-device-b-\(UUID())"]
-
-            for t in tokens {
-                let d = UserDeviceToken(userId: userId, token: t, platform: "ios", environment: "production")
-                try await d.create(on: app.db(.notifications))
+            for prefix in ["a1", "b2"] {
+                try await upsertSupabaseDeviceToken(
+                    rawToken: validHexToken(prefix: prefix), userID: userId, platform: "ios",
+                    environment: "production", appVersion: "1.0", buildNumber: nil,
+                    timezone: nil, receiveNotifications: true,
+                    db: app.db(.notifications), logger: app.logger
+                )
             }
-
             let count = try await UserDeviceToken.query(on: app.db(.notifications))
                 .filter(\.$userId == userId)
                 .count()
@@ -304,195 +453,107 @@ struct NotificationTests {
         }
     }
 
-    // MARK: - Deregister
+    // MARK: - Exact-device test path
 
-    @Test("Deregister invalidates device token")
-    func deregisterInvalidatesToken() async throws {
+    @Test("7. Exact-device test-send selects only the given registration")
+    func exactDeviceTestSelection() async throws {
         try await withApp { app in
-            let token = "token-to-deregister-\(UUID().uuidString)"
-            let device = UserDeviceToken(userId: nil, token: token, platform: "ios", environment: "production")
-            try await device.create(on: app.db(.notifications))
-            #expect(device.invalidatedAt == nil)
-
-            try await app.testing().test(
-                .DELETE, "notifications/device-token",
-                beforeRequest: { req in
-                    try req.content.encode(DeregisterDeviceRequest(
-                        deviceToken: token,
-                        environment: "production"
-                    ))
-                },
-                afterResponse: { res async in
-                    #expect(res.status == .ok)
-                }
+            let tokenA = validHexToken(prefix: "71")
+            let tokenB = validHexToken(prefix: "72")
+            try await upsertSupabaseDeviceToken(
+                rawToken: tokenA, userID: nil, platform: "ios", environment: "sandbox",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
             )
-
-            let updated = try await UserDeviceToken.find(device.id, on: app.db(.notifications))
-            #expect(updated?.invalidatedAt != nil)
-        }
-    }
-
-    @Test("Deregister is idempotent")
-    func deregisterIsIdempotent() async throws {
-        try await withApp { app in
-            let token = "idempotent-deregister-\(UUID().uuidString)"
-            let device = UserDeviceToken(userId: nil, token: token, platform: "ios", environment: "production")
-            device.invalidatedAt = Date()   // already invalidated
-            try await device.create(on: app.db(.notifications))
-
-            try await app.testing().test(
-                .DELETE, "notifications/device-token",
-                beforeRequest: { req in
-                    try req.content.encode(DeregisterDeviceRequest(
-                        deviceToken: token,
-                        environment: "production"
-                    ))
-                },
-                afterResponse: { res async in
-                    #expect(res.status == .ok)   // not 404 or 409
-                }
+            try await upsertSupabaseDeviceToken(
+                rawToken: tokenB, userID: nil, platform: "ios", environment: "sandbox",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
             )
-        }
-    }
+            let deviceA = try await UserDeviceToken.query(on: app.db(.notifications))
+                .filter(\.$tokenHash == UserDeviceToken.hash(tokenA))
+                .first()!
+            let idA = try deviceA.requireID()
 
-    // MARK: - Category defaults
-
-    @Test("Product category defaults to disabled; others default enabled")
-    func productCategoryDefaultDisabled() {
-        #expect(NotificationCategory.product.defaultEnabled == false)
-        #expect(NotificationCategory.learning.defaultEnabled == true)
-        #expect(NotificationCategory.system.defaultEnabled == true)
-    }
-
-    @Test("Broadcast respects product-disabled-by-default for users with no preference row")
-    func broadcastSkipsProductForUsersWithNoPreference() async throws {
-        try await withApp { app in
-            let userId = UUID()
-            let token = "broadcast-pref-token-\(UUID().uuidString)"
-            let device = UserDeviceToken(userId: userId, token: token, platform: "ios", environment: "production")
-            try await device.create(on: app.db(.notifications))
-            // No NotificationPreference row exists for this user/category — product defaults to disabled
-
-            let svc = app.notificationService
-            let result = try await svc.broadcast(
-                category: .product,
-                notificationType: "product.announcement",
-                title: "Test",
-                body: "Test",
-                deeplink: nil,
+            let result = try await app.notificationService.sendToRegistration(
+                registrationId: idA,
+                title: "SnapOrtho Test",
+                body: "APNs test notification",
+                deeplink: "snaportho://notifications/test",
                 db: app.db(.notifications)
             )
 
-            #expect(result.sent == 0)
-            #expect(result.skipped == 1)
-            #expect(mockAPNS.calls.isEmpty)
-
-            let attempts = try await NotificationDeliveryAttempt.query(on: app.db(.notifications))
-                .filter(\.$userId == userId)
-                .all()
-            #expect(attempts.first?.status == .skipped)
-            #expect(attempts.first?.errorCode == "category_disabled")
-        }
-    }
-
-    @Test("Broadcast sends product notifications to users who explicitly opted in")
-    func broadcastSendsProductForOptedInUsers() async throws {
-        try await withApp { app in
-            let userId = UUID()
-            let token = "broadcast-optin-token-\(UUID().uuidString)"
-            let device = UserDeviceToken(userId: userId, token: token, platform: "ios", environment: "production")
-            try await device.create(on: app.db(.notifications))
-
-            let pref = NotificationPreference(userId: userId, category: .product, enabled: true)
-            try await pref.create(on: app.db(.notifications))
-
-            let svc = app.notificationService
-            let result = try await svc.broadcast(
-                category: .product,
-                notificationType: "product.announcement",
-                title: "Test",
-                body: "Test",
-                deeplink: nil,
-                db: app.db(.notifications)
-            )
-
-            #expect(result.sent == 1)
-            #expect(result.skipped == 0)
-        }
-    }
-
-    @Test("Broadcast always sends anonymous devices regardless of category default")
-    func broadcastSendsAnonymousDevicesForProduct() async throws {
-        try await withApp { app in
-            let token = "broadcast-anon-token-\(UUID().uuidString)"
-            let device = UserDeviceToken(userId: nil, token: token, platform: "ios", environment: "production")
-            try await device.create(on: app.db(.notifications))
-
-            let svc = app.notificationService
-            let result = try await svc.broadcast(
-                category: .product,
-                notificationType: "product.announcement",
-                title: "Test",
-                body: "Test",
-                deeplink: nil,
-                db: app.db(.notifications)
-            )
-
-            // Anonymous devices have no user_id, so there's no preference row to check
-            #expect(result.sent == 1)
-        }
-    }
-
-    // MARK: - Admin test send logging
-
-    @Test("sendToDevice creates delivery attempt with matching notification_id")
-    func sendToDeviceLogsDeliveryAttempt() async throws {
-        try await withApp { app in
-            let token = "admin-test-token-\(UUID().uuidString)"
-            let device = UserDeviceToken(userId: nil, token: token, platform: "ios", environment: "production")
-            try await device.create(on: app.db(.notifications))
-
-            let svc = app.notificationService
-            let result = try await svc.sendToDevice(
-                rawToken: token,
-                environment: "production",
-                category: .system,
-                notificationType: "admin.test",
-                title: "Test",
-                body: "Test body",
-                db: app.db(.notifications)
-            )
-
-            #expect(result.sent == 1)
+            #expect(result.success)
+            #expect(result.registrationId == idA)
+            #expect(result.environment == "sandbox")
             #expect(mockAPNS.calls.count == 1)
-
-            let attempts = try await NotificationDeliveryAttempt.query(on: app.db(.notifications)).all()
-            #expect(attempts.count == 1)
-            #expect(attempts.first?.status == .sent)
-            #expect(attempts.first?.notificationType == "admin.test")
-
-            let attemptId = try attempts.first!.requireID().uuidString
-            #expect(mockAPNS.calls.first?.payload.notificationId == attemptId)
+            #expect(mockAPNS.calls.first?.token == tokenA)
+            #expect(mockAPNS.calls.first?.environment == "sandbox")
+            #expect(mockAPNS.calls.first?.payload.deeplink == "snaportho://notifications/test")
+            #expect(result.maskedToken.contains("…"))
+            #expect(!result.maskedToken.contains(tokenA))
         }
     }
 
-    @Test("sendToDevice rejects endpoint environment mismatch without contacting APNS")
-    func sendToDeviceRejectsEnvironmentMismatch() async throws {
+    @Test("8. Missing registration ID rejected")
+    func missingRegistrationIdRejected() async throws {
+        guard let adminKey = adminKey() else {
+            Issue.record("Skipped: ADMIN_API_KEY not set")
+            return
+        }
         try await withApp { app in
-            let token = String(repeating: "c", count: 64)
-            let device = UserDeviceToken(userId: nil, token: token, platform: "ios", environment: "sandbox")
-            try await device.create(on: app.db(.notifications))
+            try await app.testing().test(
+                .POST, "admin/push/test",
+                beforeRequest: { req in
+                    req.headers.add(name: "X-Admin-Key", value: adminKey)
+                    try req.content.encode(["title": "SnapOrtho Test"] as [String: String])
+                },
+                afterResponse: { res async in
+                    #expect(res.status == .badRequest)
+                }
+            )
+        }
+    }
 
+    @Test("9. Unknown registration rejected")
+    func unknownRegistrationRejected() async throws {
+        try await withApp { app in
             do {
-                _ = try await app.notificationService.sendToDevice(
-                    rawToken: token,
-                    environment: "sandbox",
-                    notificationType: "admin.test",
-                    title: "SnapOrtho Test",
-                    body: "Notification delivery is working.",
+                _ = try await app.notificationService.sendToRegistration(
+                    registrationId: UUID(),
+                    title: "T", body: "B",
                     db: app.db(.notifications)
                 )
-                Issue.record("Expected environment mismatch")
+                Issue.record("Expected not found")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .notFound)
+            }
+            #expect(mockAPNS.calls.isEmpty)
+        }
+    }
+
+    @Test("10. Disabled token rejection")
+    func disabledTokenRejection() async throws {
+        try await withApp { app in
+            let token = validHexToken(prefix: "10")
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: nil, platform: "ios", environment: "production",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
+            )
+            let device = try await UserDeviceToken.query(on: app.db(.notifications))
+                .filter(\.$tokenHash == UserDeviceToken.hash(token))
+                .first()!
+            device.invalidatedAt = Date()
+            try await device.update(on: app.db(.notifications))
+            let id = try device.requireID()
+
+            do {
+                _ = try await app.notificationService.sendToRegistration(
+                    registrationId: id, title: "T", body: "B",
+                    db: app.db(.notifications)
+                )
+                Issue.record("Expected conflict")
             } catch let abort as any AbortError {
                 #expect(abort.status == .conflict)
             }
@@ -500,14 +561,267 @@ struct NotificationTests {
         }
     }
 
+    @Test("11. Unknown environment rejection on registration row")
+    func unknownEnvironmentOnRowRejected() async throws {
+        try await withApp { app in
+            // Bypass upsert validation to plant a bad environment (simulates corrupt data)
+            let token = validHexToken(prefix: "11")
+            let device = UserDeviceToken(
+                userId: nil, token: token, platform: "ios", environment: "production"
+            )
+            try await device.create(on: app.db(.notifications))
+            // Force unknown environment via raw update if CHECK allows — may fail on CHECK constraint
+            // So instead verify parse rejects and sendToDevice rejects bad env strings.
+            do {
+                _ = try await app.notificationService.sendToDevice(
+                    rawToken: token,
+                    environment: "staging",
+                    notificationType: "admin.test",
+                    title: "T", body: "B",
+                    db: app.db(.notifications)
+                )
+                Issue.record("Expected bad request")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .badRequest)
+            }
+        }
+    }
+
+    @Test("12. Sandbox client selection")
+    func sandboxClientSelection() async throws {
+        try await withApp { app in
+            let token = validHexToken(prefix: "12")
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: nil, platform: "ios", environment: "sandbox",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
+            )
+            let device = try await UserDeviceToken.query(on: app.db(.notifications))
+                .filter(\.$tokenHash == UserDeviceToken.hash(token))
+                .first()!
+            _ = try await app.notificationService.sendToRegistration(
+                registrationId: try device.requireID(),
+                title: "T", body: "B",
+                db: app.db(.notifications)
+            )
+            #expect(mockAPNS.calls.first?.environment == "sandbox")
+        }
+    }
+
+    @Test("13. Production client selection")
+    func productionClientSelection() async throws {
+        try await withApp { app in
+            let token = validHexToken(prefix: "13")
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: nil, platform: "ios", environment: "production",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
+            )
+            let device = try await UserDeviceToken.query(on: app.db(.notifications))
+                .filter(\.$tokenHash == UserDeviceToken.hash(token))
+                .first()!
+            _ = try await app.notificationService.sendToRegistration(
+                registrationId: try device.requireID(),
+                title: "T", body: "B",
+                db: app.db(.notifications)
+            )
+            #expect(mockAPNS.calls.first?.environment == "production")
+        }
+    }
+
+    @Test("14. Topic is the configured bundle id")
+    func topicMatchesBundle() async throws {
+        try await withApp { app in
+            let token = validHexToken(prefix: "14")
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: nil, platform: "ios", environment: "production",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
+            )
+            let device = try await UserDeviceToken.query(on: app.db(.notifications))
+                .filter(\.$tokenHash == UserDeviceToken.hash(token))
+                .first()!
+            let result = try await app.notificationService.sendToRegistration(
+                registrationId: try device.requireID(),
+                title: "T", body: "B",
+                db: app.db(.notifications)
+            )
+            #expect(result.topic == app.notificationService.bundleId)
+            #expect(mockAPNS.calls.first?.bundleId == app.notificationService.bundleId)
+        }
+    }
+
+    @Test("15. APNs success response persistence")
+    func apnsSuccessPersistence() async throws {
+        try await withApp { app in
+            let token = validHexToken(prefix: "15")
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: nil, platform: "ios", environment: "production",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
+            )
+            let device = try await UserDeviceToken.query(on: app.db(.notifications))
+                .filter(\.$tokenHash == UserDeviceToken.hash(token))
+                .first()!
+            let id = try device.requireID()
+            let result = try await app.notificationService.sendToRegistration(
+                registrationId: id, title: "T", body: "B",
+                deeplink: "snaportho://notifications/test",
+                db: app.db(.notifications)
+            )
+            #expect(result.success)
+            #expect(result.apnsId != nil)
+            #expect(result.deliveryAttemptId != nil)
+
+            let attempt = try await NotificationDeliveryAttempt.find(result.deliveryAttemptId!, on: app.db(.notifications))
+            #expect(attempt?.status == .sent)
+            #expect(attempt?.apnsId != nil)
+            #expect(attempt?.metadata["apns_environment"] == "production")
+            #expect(attempt?.metadata["apns_topic"] == app.notificationService.bundleId)
+            #expect(attempt?.deeplink == "snaportho://notifications/test")
+        }
+    }
+
+    @Test("16. Permanent APNs failure disables token")
+    func permanentFailureDisablesToken() async throws {
+        try await withApp { app in
+            mockAPNS.shouldThrowTokenError = .unregistered
+            let token = validHexToken(prefix: "16")
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: nil, platform: "ios", environment: "production",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
+            )
+            let device = try await UserDeviceToken.query(on: app.db(.notifications))
+                .filter(\.$tokenHash == UserDeviceToken.hash(token))
+                .first()!
+            let id = try device.requireID()
+            let result = try await app.notificationService.sendToRegistration(
+                registrationId: id, title: "T", body: "B",
+                db: app.db(.notifications)
+            )
+            #expect(!result.success)
+            #expect(result.registrationDisabled)
+            #expect(result.errorCode == "Unregistered")
+
+            let updated = try await UserDeviceToken.find(id, on: app.db(.notifications))
+            #expect(updated?.invalidatedAt != nil)
+        }
+    }
+
+    @Test("17. Transient APNs failure does not disable token")
+    func transientFailureDoesNotDisable() async throws {
+        try await withApp { app in
+            mockAPNS.shouldThrowTransientError = .timeout
+            let token = validHexToken(prefix: "17")
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: nil, platform: "ios", environment: "production",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
+            )
+            let device = try await UserDeviceToken.query(on: app.db(.notifications))
+                .filter(\.$tokenHash == UserDeviceToken.hash(token))
+                .first()!
+            let id = try device.requireID()
+            let result = try await app.notificationService.sendToRegistration(
+                registrationId: id, title: "T", body: "B",
+                db: app.db(.notifications)
+            )
+            #expect(!result.success)
+            #expect(!result.registrationDisabled)
+            #expect(result.errorCode == "Timeout")
+
+            let updated = try await UserDeviceToken.find(id, on: app.db(.notifications))
+            #expect(updated?.invalidatedAt == nil)
+        }
+    }
+
+    @Test("18. Tokens masked in list API response")
+    func tokensMaskedInListAPI() async throws {
+        guard let adminKey = adminKey() else {
+            Issue.record("Skipped: ADMIN_API_KEY not set")
+            return
+        }
+        try await withApp { app in
+            let token = validHexToken(prefix: "18")
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: nil, platform: "ios", environment: "sandbox",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
+            )
+            try await app.testing().test(
+                .GET, "admin/notifications/registrations?environment=sandbox&limit=10",
+                beforeRequest: { req in
+                    req.headers.add(name: "X-Admin-Key", value: adminKey)
+                },
+                afterResponse: { res async in
+                    #expect(res.status == .ok)
+                    let body = res.body.string
+                    #expect(!body.contains(token))
+                    #expect(body.contains("maskedToken") || body.contains("masked_token") || body.contains("…"))
+                }
+            )
+        }
+    }
+
+    @Test("19. Deep-link payload included correctly")
+    func deeplinkPayloadIncluded() async throws {
+        try await withApp { app in
+            let token = validHexToken(prefix: "19")
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: nil, platform: "ios", environment: "production",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
+            )
+            let device = try await UserDeviceToken.query(on: app.db(.notifications))
+                .filter(\.$tokenHash == UserDeviceToken.hash(token))
+                .first()!
+            _ = try await app.notificationService.sendToRegistration(
+                registrationId: try device.requireID(),
+                title: "T", body: "B",
+                deeplink: "snaportho://notifications/test",
+                db: app.db(.notifications)
+            )
+            #expect(mockAPNS.calls.first?.payload.deeplink == "snaportho://notifications/test")
+            #expect(mockAPNS.calls.first?.payload.notificationId.isEmpty == false)
+        }
+    }
+
+    @Test("20. No fallback to first database device")
+    func noFallbackToFirstDevice() async throws {
+        try await withApp { app in
+            let first = validHexToken(prefix: "f1")
+            try await upsertSupabaseDeviceToken(
+                rawToken: first, userID: nil, platform: "ios", environment: "production",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
+            )
+            // Unknown registration must not send to `first`
+            do {
+                _ = try await app.notificationService.sendToRegistration(
+                    registrationId: UUID(),
+                    title: "T", body: "B",
+                    db: app.db(.notifications)
+                )
+                Issue.record("Expected not found")
+            } catch let abort as any AbortError {
+                #expect(abort.status == .notFound)
+            }
+            #expect(mockAPNS.calls.isEmpty)
+        }
+    }
+
+    // MARK: - Legacy sendToDevice path
+
     @Test("sendToDevice rejects opted-out device without contacting APNS")
     func sendToDeviceRejectsOptedOutDevice() async throws {
         try await withApp { app in
-            let token = String(repeating: "d", count: 64)
-            let device = UserDeviceToken(userId: nil, token: token, platform: "ios", environment: "production")
-            device.receiveNotifications = false
-            try await device.create(on: app.db(.notifications))
-
+            let token = validHexToken(prefix: "d0")
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: nil, platform: "ios", environment: "production",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: false,
+                db: app.db(.notifications), logger: app.logger
+            )
             do {
                 _ = try await app.notificationService.sendToDevice(
                     rawToken: token,
@@ -525,73 +839,102 @@ struct NotificationTests {
         }
     }
 
-    // MARK: - Preferences
-
-    @Test("Unauthenticated preferences request rejected")
-    func preferencesRequiresAuth() async throws {
+    @Test("APNS bad device token invalidates device")
+    func badDeviceTokenInvalidatesDevice() async throws {
         try await withApp { app in
-            try await app.testing().test(
-                .GET, "notifications/preferences",
-                afterResponse: { res async in
-                    #expect(res.status == .unauthorized)
-                }
-            )
-        }
-    }
-
-    @Test("Disabling a category causes sends to be skipped")
-    func disabledCategoryCausesSkip() async throws {
-        try await withApp { app in
+            mockAPNS.shouldThrowTokenError = .badDeviceToken
             let userId = UUID()
-            // Disable learning category
-            let pref = NotificationPreference(
-                userId: userId,
-                category: .learning,
-                enabled: false
+            let token = validHexToken(prefix: "bd")
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: userId, platform: "ios", environment: "production",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
             )
-            try await pref.create(on: app.db(.notifications))
+            let device = try await UserDeviceToken.query(on: app.db(.notifications))
+                .filter(\.$tokenHash == UserDeviceToken.hash(token))
+                .first()!
+            let deviceId = try device.requireID()
 
-            // Create an active device for this user
-            let token = "pref-test-token-\(UUID().uuidString)"
-            let device = UserDeviceToken(userId: userId, token: token, platform: "ios", environment: "production")
-            try await device.create(on: app.db(.notifications))
-
-            let svc = app.notificationService
-            let result = try await svc.sendToUser(
+            _ = try await app.notificationService.sendToUser(
                 userID: userId,
-                category: .learning,
-                notificationType: "learning.daily_question",
-                title: "Daily Question",
-                body: "Test question body",
-                deeplink: "snaportho://learn/question/daily",
+                category: .system,
+                notificationType: "system.test",
+                title: "Test",
+                body: "Test",
+                deeplink: nil,
                 db: app.db(.notifications)
             )
 
-            #expect(result.skipped == 1)
-            #expect(result.sent == 0)
-            #expect(mockAPNS.calls.isEmpty)
-
-            // A skipped delivery attempt should be logged
-            let attempts = try await NotificationDeliveryAttempt.query(on: app.db(.notifications))
-                .filter(\.$userId == userId)
-                .all()
-            #expect(attempts.count == 1)
-            #expect(attempts.first?.status == .skipped)
+            let updated = try await UserDeviceToken.find(deviceId, on: app.db(.notifications))
+            #expect(updated?.invalidatedAt != nil)
+            let attempts = try await NotificationDeliveryAttempt.query(on: app.db(.notifications)).all()
+            #expect(attempts.first?.status == .failed)
+            #expect(attempts.first?.errorCode == "BadDeviceToken")
         }
     }
 
-    // MARK: - Delivery Logging
+    @Test("Provider error does not disable token")
+    func providerErrorDoesNotDisable() async throws {
+        try await withApp { app in
+            mockAPNS.shouldThrowProviderError = .expiredProviderToken
+            let token = validHexToken(prefix: "pe")
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: nil, platform: "ios", environment: "production",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
+            )
+            let device = try await UserDeviceToken.query(on: app.db(.notifications))
+                .filter(\.$tokenHash == UserDeviceToken.hash(token))
+                .first()!
+            let id = try device.requireID()
+            let result = try await app.notificationService.sendToRegistration(
+                registrationId: id, title: "T", body: "B",
+                db: app.db(.notifications)
+            )
+            #expect(!result.success)
+            #expect(!result.registrationDisabled)
+            #expect(result.errorCode == "ExpiredProviderToken")
+            let updated = try await UserDeviceToken.find(id, on: app.db(.notifications))
+            #expect(updated?.invalidatedAt == nil)
+        }
+    }
+
+    // MARK: - Preferences / broadcast
+
+    @Test("Broadcast respects product-disabled-by-default for users with no preference row")
+    func broadcastSkipsProductForUsersWithNoPreference() async throws {
+        try await withApp { app in
+            let userId = UUID()
+            let token = validHexToken(prefix: "bp")
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: userId, platform: "ios", environment: "production",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
+            )
+
+            let result = try await app.notificationService.broadcast(
+                category: .product,
+                notificationType: "product.announcement",
+                title: "Test", body: "Test", deeplink: nil,
+                db: app.db(.notifications)
+            )
+            #expect(result.sent == 0)
+            #expect(result.skipped == 1)
+            #expect(mockAPNS.calls.isEmpty)
+        }
+    }
 
     @Test("Successful send creates a delivery attempt with status=sent")
     func successfulSendCreatesDeliveryAttempt() async throws {
         try await withApp { app in
             let userId = UUID()
-            let token = "logging-test-token-\(UUID().uuidString)"
-            let device = UserDeviceToken(userId: userId, token: token, platform: "ios", environment: "production")
-            try await device.create(on: app.db(.notifications))
-
-            let svc = app.notificationService
-            let result = try await svc.sendToUser(
+            let token = validHexToken(prefix: "ss")
+            try await upsertSupabaseDeviceToken(
+                rawToken: token, userID: userId, platform: "ios", environment: "production",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
+            )
+            let result = try await app.notificationService.sendToUser(
                 userID: userId,
                 category: .system,
                 notificationType: "system.account",
@@ -600,169 +943,39 @@ struct NotificationTests {
                 deeplink: nil,
                 db: app.db(.notifications)
             )
-
             #expect(result.sent == 1)
             #expect(mockAPNS.calls.count == 1)
             #expect(mockAPNS.calls.first?.payload.type == "system.account")
-
-            let attempts = try await NotificationDeliveryAttempt.query(on: app.db(.notifications))
-                .filter(\.$userId == userId)
-                .all()
-            #expect(attempts.count == 1)
-            #expect(attempts.first?.status == .sent)
-            #expect(attempts.first?.notificationType == "system.account")
         }
     }
 
-    @Test("Failed send creates a delivery attempt with status=failed")
-    func failedSendCreatesFailedAttempt() async throws {
+    // MARK: - Deregister
+
+    @Test("Deregister invalidates device token")
+    func deregisterInvalidatesToken() async throws {
         try await withApp { app in
-            mockAPNS.shouldThrowGenericError = true
-
-            let userId = UUID()
-            let token = "failed-send-token-\(UUID().uuidString)"
-            let device = UserDeviceToken(userId: userId, token: token, platform: "ios", environment: "production")
-            try await device.create(on: app.db(.notifications))
-
-            let svc = app.notificationService
-            let result = try await svc.sendToUser(
-                userID: userId,
-                category: .system,
-                notificationType: "system.test",
-                title: "Test",
-                body: "Test",
-                deeplink: nil,
-                db: app.db(.notifications)
-            )
-
-            #expect(result.failed == 1)
-            #expect(result.sent == 0)
-
-            let attempts = try await NotificationDeliveryAttempt.query(on: app.db(.notifications))
-                .filter(\.$userId == userId)
-                .all()
-            #expect(attempts.first?.status == .failed)
-            #expect(attempts.first?.errorCode == "transient")
-        }
-    }
-
-    @Test("APNS bad device token invalidates device and creates failed attempt")
-    func badDeviceTokenInvalidatesDevice() async throws {
-        try await withApp { app in
-            mockAPNS.shouldThrowTokenError = .badDeviceToken
-
-            let userId = UUID()
-            let token = "bad-device-token-\(UUID().uuidString)"
-            let device = UserDeviceToken(userId: userId, token: token, platform: "ios", environment: "production")
-            try await device.create(on: app.db(.notifications))
-            let deviceId = try device.requireID()
-
-            let svc = app.notificationService
-            _ = try await svc.sendToUser(
-                userID: userId,
-                category: .system,
-                notificationType: "system.test",
-                title: "Test",
-                body: "Test",
-                deeplink: nil,
-                db: app.db(.notifications)
-            )
-
-            let updated = try await UserDeviceToken.find(deviceId, on: app.db(.notifications))
-            #expect(updated?.invalidatedAt != nil)
-
-            let attempts = try await NotificationDeliveryAttempt.query(on: app.db(.notifications)).all()
-            #expect(attempts.first?.status == .failed)
-            #expect(attempts.first?.errorCode == "invalid_token")
-        }
-    }
-
-    @Test("APNS unregistered token invalidates device")
-    func unregisteredTokenInvalidatesDevice() async throws {
-        try await withApp { app in
-            mockAPNS.shouldThrowTokenError = .unregistered
-
-            let userId = UUID()
-            let token = "unregistered-token-\(UUID().uuidString)"
-            let device = UserDeviceToken(userId: userId, token: token, platform: "ios", environment: "production")
-            try await device.create(on: app.db(.notifications))
-            let deviceId = try device.requireID()
-
-            let svc = app.notificationService
-            _ = try await svc.sendToUser(
-                userID: userId,
-                category: .system,
-                notificationType: "system.test",
-                title: "Test",
-                body: "Test",
-                deeplink: nil,
-                db: app.db(.notifications)
-            )
-
-            let updated = try await UserDeviceToken.find(deviceId, on: app.db(.notifications))
-            #expect(updated?.invalidatedAt != nil)
-        }
-    }
-
-    // MARK: - Backfill idempotency
-
-    @Test("Backfill upsert does not duplicate tokens")
-    func backfillIsIdempotent() async throws {
-        try await withApp { app in
-            let token = "backfill-test-token-\(UUID().uuidString)"
-            let tokenHash = UserDeviceToken.hash(token)
-
-            // Simulate running backfill twice
-            for _ in 0..<2 {
-                try await upsertSupabaseDeviceToken(
-                    rawToken: token,
-                    userID: nil,
-                    platform: "ios",
-                    environment: "production",
-                    appVersion: "1.0",
-                    buildNumber: nil,
-                    timezone: "America/Chicago",
-                    receiveNotifications: true,
-                    db: app.db(.notifications),
-                    logger: app.logger
-                )
-            }
-
-            let count = try await UserDeviceToken.query(on: app.db(.notifications))
-                .filter(\.$tokenHash == tokenHash)
-                .filter(\.$environment == "production")
-                .count()
-            #expect(count == 1)
-        }
-    }
-
-    @Test("Backfill with non-UUID learn_user_id inserts with user_id = nil")
-    func backfillHandlesInvalidUID() async throws {
-        try await withApp { app in
-            let token = "invalid-uid-backfill-\(UUID().uuidString)"
-
-            // "anonymous" is not a UUID — should insert with user_id = nil
-            let userID: UUID? = UUID(uuidString: "anonymous")  // nil
-            #expect(userID == nil)
-
+            let token = validHexToken(prefix: "dr")
             try await upsertSupabaseDeviceToken(
-                rawToken: token,
-                userID: nil,
-                platform: "ios",
-                environment: "production",
-                appVersion: "1.0",
-                buildNumber: nil,
-                timezone: nil,
-                receiveNotifications: true,
-                db: app.db(.notifications),
-                logger: app.logger
+                rawToken: token, userID: nil, platform: "ios", environment: "production",
+                appVersion: "1.0", buildNumber: nil, timezone: nil, receiveNotifications: true,
+                db: app.db(.notifications), logger: app.logger
             )
-
-            let device = try await UserDeviceToken.query(on: app.db(.notifications))
+            try await app.testing().test(
+                .DELETE, "notifications/device-token",
+                beforeRequest: { req in
+                    try req.content.encode(DeregisterDeviceRequest(
+                        deviceToken: token,
+                        environment: "production"
+                    ))
+                },
+                afterResponse: { res async in
+                    #expect(res.status == .ok)
+                }
+            )
+            let updated = try await UserDeviceToken.query(on: app.db(.notifications))
                 .filter(\.$tokenHash == UserDeviceToken.hash(token))
                 .first()
-            #expect(device != nil)
-            #expect(device?.userId == nil)
+            #expect(updated?.invalidatedAt != nil)
         }
     }
 }

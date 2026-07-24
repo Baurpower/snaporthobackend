@@ -192,8 +192,11 @@ func routes(_ app: Application) throws {
     let legacyAdmin = app.grouped(AdminAuthMiddleware())
 
     legacyAdmin.post("send-test-push") { req async throws -> String in
-        req.logger.warning("⚠️ Rejected unsafe deprecated test route; exact token and environment are required")
-        throw Abort(.gone, reason: "Use POST /admin/notifications/test with an exact deviceToken and environment")
+        req.logger.warning("⚠️ Rejected unsafe deprecated test route; exact registration selection is required")
+        throw Abort(
+            .gone,
+            reason: "Use POST /admin/push/test with registrationId, or POST /admin/notifications/test with registrationId (preferred) or exact deviceToken+environment"
+        )
     }
 
     legacyAdmin.post("send-broadcast-push") { req async throws -> String in

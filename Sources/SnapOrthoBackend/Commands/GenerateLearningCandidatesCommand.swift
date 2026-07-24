@@ -49,7 +49,7 @@ struct GenerateLearningCandidatesCommand: AsyncCommand {
             specificUserId = parsed
         }
 
-        let apnsEnvironment = app.storage[APNSRuntimeConfigStorageKey.self]?.environment ?? "production"
+        let apnsEnvironment = app.storage[APNSRuntimeConfigStorageKey.self]?.defaultEnvironment ?? "production"
 
         logger.info("🚀 generate-learning-candidates starting (dryRun=\(dryRun), limit=\(signature.limit.map(String.init) ?? "none"), userId=\(specificUserId?.uuidString ?? "all"), env=\(apnsEnvironment))")
 
