@@ -36,15 +36,19 @@ struct ProcessScheduledNotificationsCommand: AsyncCommand {
     /// Testable core, separate from the thin CLI wrapper above (matches the pattern used by
     /// `CandidateSchedulerJob.tick` in Phase 2A) — avoids constructing a `CommandSignature`
     /// directly in tests.
-    static func process(application app: Application, limit: Int) async throws {
+    static func process(
+        application app: Application,
+        limit: Int,
+        database databaseOverride: (any Database)? = nil
+    ) async throws {
         let logger = app.logger
 
-        guard app.databases.ids().contains(.notifications) else {
+        guard databaseOverride != nil || app.databases.ids().contains(.notifications) else {
             logger.critical("❌ .notifications database not configured — cannot process candidates")
             throw Abort(.internalServerError)
         }
 
-        let db = app.db(.notifications)
+        let db = databaseOverride ?? app.db(.notifications)
         let now = Date()
 
         let due = try await NotificationCandidate.query(on: db)

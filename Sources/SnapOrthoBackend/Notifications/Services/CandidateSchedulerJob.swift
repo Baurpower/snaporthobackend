@@ -1,17 +1,60 @@
 import Vapor
 import Fluent
 import NIOCore
+import FluentPostgresDriver
 
-/// Phase 2A scheduler foundation. Runs on a fixed interval for the lifetime of the process and,
-/// in this phase, ONLY:
-///   1. Logs the count of pending `notification_candidates` rows (zero today — no generator
-///      exists yet; Phase 2B/2C/2D add candidate generation).
-///   2. Rolls over `NotificationUserState.sendsToday`/`sendsThisWeek` when the day/week changes.
+struct NotificationAutomationConfig: Sendable {
+    let enabled: Bool
+    let dryRun: Bool
+    let generationLimit: Int
+    let dispatchLimit: Int
+    let interval: TimeAmount
+
+    static func load() -> Self {
+        Self(
+            enabled: parseBool(Environment.get("NOTIFICATION_AUTOMATION_ENABLED"), default: false),
+            dryRun: parseBool(Environment.get("NOTIFICATION_AUTOMATION_DRY_RUN"), default: true),
+            generationLimit: parsePositiveInt(
+                Environment.get("NOTIFICATION_GENERATION_LIMIT"), default: 100
+            ),
+            dispatchLimit: parsePositiveInt(
+                Environment.get("NOTIFICATION_DISPATCH_LIMIT"), default: 50
+            ),
+            interval: .minutes(Int64(parsePositiveInt(
+                Environment.get("NOTIFICATION_AUTOMATION_INTERVAL_MINUTES"), default: 15
+            )))
+        )
+    }
+
+    private static func parseBool(_ value: String?, default defaultValue: Bool) -> Bool {
+        guard let value else { return defaultValue }
+        switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "on": return true
+        case "0", "false", "no", "off": return false
+        default: return defaultValue
+        }
+    }
+
+    private static func parsePositiveInt(_ value: String?, default defaultValue: Int) -> Int {
+        guard let value, let parsed = Int(value), parsed > 0 else { return defaultValue }
+        return parsed
+    }
+}
+
+struct NotificationAutomationConfigStorageKey: StorageKey {
+    typealias Value = NotificationAutomationConfig
+}
+
+/// Maintains notification counters and, when explicitly enabled, generates learning
+/// candidates and dispatches due candidates. Automation is disabled by default and starts in
+/// dry-run mode when enabled without an explicit dry-run setting.
 ///
-/// It does not generate candidates and does not send anything. This validates the scheduler
-/// loop itself runs reliably — starts on boot, stops cleanly on shutdown, survives errors in
-/// one tick without crashing the process — before any dispatch logic is layered on top.
+/// Each active automation cycle runs under a Postgres transaction-scoped advisory lock. This
+/// ensures horizontally-scaled Vapor instances cannot run the same cycle concurrently. The
+/// lock is released automatically on commit, rollback, connection loss, or process exit.
 final class CandidateSchedulerJob: LifecycleHandler, Sendable {
+    static let advisoryLockKey: Int64 = 6_002_807_166_515_434_568
+
     private let interval: TimeAmount
     private let box: TaskBox
 
@@ -46,6 +89,14 @@ final class CandidateSchedulerJob: LifecycleHandler, Sendable {
             return
         }
         let db = application.db(.notifications)
+        let config = application.storage[NotificationAutomationConfigStorageKey.self]
+            ?? NotificationAutomationConfig(
+                enabled: false,
+                dryRun: true,
+                generationLimit: 100,
+                dispatchLimit: 50,
+                interval: .minutes(15)
+            )
 
         do {
             let pendingCount = try await NotificationCandidate.query(on: db)
@@ -60,6 +111,76 @@ final class CandidateSchedulerJob: LifecycleHandler, Sendable {
             try await resetCountersIfNeeded(db: db, now: Date(), logger: logger)
         } catch {
             logger.error("❌ Candidate scheduler tick failed to reset counters: \(error)")
+        }
+
+        guard config.enabled else {
+            logger.debug("⏸ Notification automation disabled")
+            return
+        }
+
+        do {
+            try await runAutomatedCycle(application: application, database: db, config: config)
+        } catch {
+            logger.error("❌ Notification automation cycle failed: \(error)")
+        }
+    }
+
+    private struct AdvisoryLockRow: Decodable {
+        let acquired: Bool
+    }
+
+    /// Public to the module for focused integration tests.
+    static func runAutomatedCycle(
+        application: Application,
+        database: any Database,
+        config: NotificationAutomationConfig
+    ) async throws {
+        guard database is any PostgresDatabase else {
+            application.logger.error("❌ Notification automation requires Postgres advisory locking")
+            return
+        }
+
+        try await database.transaction { transaction in
+            guard let transactionPostgres = transaction as? any PostgresDatabase else {
+                throw Abort(.internalServerError, reason: "Notification transaction is not Postgres")
+            }
+
+            // Stable application-specific key. Transaction scope guarantees automatic release.
+            let lock = try await transactionPostgres.sql().raw("""
+                SELECT pg_try_advisory_xact_lock(\(bind: advisoryLockKey)) AS acquired
+            """).first(decoding: AdvisoryLockRow.self)
+
+            guard lock?.acquired == true else {
+                application.logger.info("⏭ Notification automation skipped — another instance holds the scheduler lock")
+                return
+            }
+
+            let runtime = application.storage[APNSRuntimeConfigStorageKey.self]
+            let environment = runtime?.defaultEnvironment ?? "production"
+            let generator = LearningCandidateGenerator(
+                apnsEnvironment: environment,
+                logger: application.logger
+            )
+
+            let result = try await generator.run(
+                db: transaction,
+                dryRun: config.dryRun,
+                limit: config.generationLimit,
+                specificUserId: nil
+            )
+
+            if config.dryRun {
+                application.logger.info(
+                    "🔎 Notification automation dry run complete — evaluated=\(result.evaluated) wouldCreate=\(result.wouldCreate); dispatch skipped"
+                )
+                return
+            }
+
+            try await ProcessScheduledNotificationsCommand.process(
+                application: application,
+                limit: config.dispatchLimit,
+                database: transaction
+            )
         }
     }
 

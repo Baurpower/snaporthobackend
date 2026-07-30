@@ -101,9 +101,71 @@ curl -sS -X POST "https://api.snap-ortho.com/admin/notifications/test" \
 
 ## Scheduled delivery
 
-`CandidateSchedulerJob` maintains candidate state but does not dispatch pending
-rows. Candidate generation and `process-scheduled-notifications` are currently
-operator-invoked commands. Never test scheduling through the broadcast route.
+`CandidateSchedulerJob` maintains candidate state and can automatically generate
+learning candidates and dispatch due candidates. Automation is opt-in:
+
+| Variable | Default | Purpose |
+|---|---:|---|
+| `NOTIFICATION_AUTOMATION_ENABLED` | `false` | Master kill switch |
+| `NOTIFICATION_AUTOMATION_DRY_RUN` | `true` | Report eligibility without writes or sends |
+| `NOTIFICATION_AUTOMATION_INTERVAL_MINUTES` | `15` | Scheduler cadence |
+| `NOTIFICATION_GENERATION_LIMIT` | `100` | Maximum users evaluated per cycle |
+| `NOTIFICATION_DISPATCH_LIMIT` | `50` | Maximum due candidate rows fetched per cycle |
+
+When fully enabled, each cycle acquires a transaction-scoped Postgres advisory
+lock, generates candidates, and processes due candidates. If another Vapor
+instance holds the lock, the cycle exits without generating or sending. The lock
+is automatically released when the transaction completes, the connection is
+lost, or the process exits. A failed cycle is retried at the next interval.
+
+The existing preference, holdout, cooldown, daily/weekly cap, ranking, and APNs
+checks remain in force. Manual generation and processing commands remain
+available for diagnostics. Never test scheduling through the broadcast route.
+
+### Staged activation
+
+Deploy first with:
+
+```text
+NOTIFICATION_AUTOMATION_ENABLED=false
+NOTIFICATION_AUTOMATION_DRY_RUN=true
+NOTIFICATION_GENERATION_LIMIT=10
+NOTIFICATION_DISPATCH_LIMIT=10
+```
+
+Seed templates once with
+`swift run SnapOrthoBackend seed-notification-templates`. Then enable reporting
+without sends:
+
+```text
+NOTIFICATION_AUTOMATION_ENABLED=true
+NOTIFICATION_AUTOMATION_DRY_RUN=true
+```
+
+After reviewing at least one cycle's aggregate eligibility counts, start the
+small production batch:
+
+```text
+NOTIFICATION_AUTOMATION_ENABLED=true
+NOTIFICATION_AUTOMATION_DRY_RUN=false
+NOTIFICATION_GENERATION_LIMIT=10
+NOTIFICATION_DISPATCH_LIMIT=10
+```
+
+Restart the service after environment changes. Verify candidate and delivery
+attempt rows before increasing either limit.
+
+### Emergency stop
+
+Set `NOTIFICATION_AUTOMATION_ENABLED=false` and restart the service. Existing
+pending candidates remain pending but will not be automatically dispatched. To
+neutralize them:
+
+```sql
+UPDATE notification_candidates
+SET status = 'expired'
+WHERE status = 'pending';
+```
 
 ## EC2 verification (safe)
 
@@ -188,6 +250,7 @@ startup logs for:
 ```text
 ✅ APNS configured default=… configured=[production,sandbox] topic=com.alexbaur.Snap-Ortho
 ✅ Supabase notifications DB configured
+[notification-automation] enabled=… dry_run=… interval_minutes=… generation_limit=… dispatch_limit=…
 ```
 
 Rollback by redeploying the previous known-good image/SHA. Do not drop notification tables.

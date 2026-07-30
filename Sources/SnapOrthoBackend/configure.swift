@@ -254,7 +254,18 @@ public func configure(_ app: Application) throws {
     app.asyncCommands.use(GenerateLearningCandidatesCommand(), as: GenerateLearningCandidatesCommand.name)
     app.asyncCommands.use(ProcessScheduledNotificationsCommand(), as: ProcessScheduledNotificationsCommand.name)
 
-    app.lifecycle.use(CandidateSchedulerJob())
+    let notificationAutomation = NotificationAutomationConfig.load()
+    app.storage[NotificationAutomationConfigStorageKey.self] = notificationAutomation
+    app.logger.info(
+        """
+        [notification-automation] enabled=\(notificationAutomation.enabled) \
+        dry_run=\(notificationAutomation.dryRun) \
+        interval_minutes=\(notificationAutomation.interval.nanoseconds / 60_000_000_000) \
+        generation_limit=\(notificationAutomation.generationLimit) \
+        dispatch_limit=\(notificationAutomation.dispatchLimit)
+        """
+    )
+    app.lifecycle.use(CandidateSchedulerJob(interval: notificationAutomation.interval))
 
     // ─────────────  CORS  ─────────────
     let cors = CORSMiddleware(configuration: .init(

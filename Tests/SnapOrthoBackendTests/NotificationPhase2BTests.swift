@@ -405,4 +405,108 @@ struct NotificationPhase2BTests {
             #expect(attempts > 0)
         }
     }
+
+    // MARK: - Automatic scheduler
+
+    @Test("Automatic scheduler dry-run never creates or dispatches candidates")
+    func automaticSchedulerDryRunHasNoWrites() async throws {
+        try await withApp { app in
+            _ = try await makeEligibleUser(app: app, withBrobotHistory: true)
+            let db = app.db(.notifications)
+            let config = NotificationAutomationConfig(
+                enabled: true,
+                dryRun: true,
+                generationLimit: 100,
+                dispatchLimit: 50,
+                interval: .minutes(15)
+            )
+
+            try await CandidateSchedulerJob.runAutomatedCycle(
+                application: app,
+                database: db,
+                config: config
+            )
+
+            #expect(try await NotificationCandidate.query(on: db).count() == 0)
+            #expect(try await NotificationDeliveryAttempt.query(on: db).count() == 0)
+        }
+    }
+
+    @Test("Automatic scheduler dispatches a due candidate when fully enabled")
+    func automaticSchedulerDispatchesDueCandidate() async throws {
+        try await withApp { app in
+            let userId = try await makeEligibleUser(app: app, withBrobotHistory: true)
+            let db = app.db(.notifications)
+            let now = Date()
+            _ = try await generator.run(
+                db: db,
+                dryRun: false,
+                limit: nil,
+                specificUserId: userId,
+                now: now.addingTimeInterval(-86_400)
+            )
+            let candidate = try #require(
+                await NotificationCandidate.query(on: db).filter(\.$userId == userId).first()
+            )
+            candidate.eligibleAt = now.addingTimeInterval(-60)
+            candidate.expiresAt = now.addingTimeInterval(3_600)
+            try await candidate.update(on: db)
+
+            let config = NotificationAutomationConfig(
+                enabled: true,
+                dryRun: false,
+                generationLimit: 100,
+                dispatchLimit: 50,
+                interval: .minutes(15)
+            )
+            try await CandidateSchedulerJob.runAutomatedCycle(
+                application: app,
+                database: db,
+                config: config
+            )
+
+            let updated = try await NotificationCandidate.find(candidate.id, on: db)
+            #expect(updated?.status == .sent)
+            #expect(
+                try await NotificationDeliveryAttempt.query(on: db)
+                    .filter(\.$userId == userId)
+                    .count() > 0
+            )
+        }
+    }
+
+    @Test("Automatic scheduler skips when another instance holds the database lock")
+    func automaticSchedulerHonorsDatabaseLock() async throws {
+        try await withApp { app in
+            _ = try await makeEligibleUser(app: app, withBrobotHistory: true)
+            let db = app.db(.notifications)
+            guard db is any PostgresDatabase else {
+                Issue.record("Test requires Postgres")
+                return
+            }
+            let config = NotificationAutomationConfig(
+                enabled: true,
+                dryRun: false,
+                generationLimit: 100,
+                dispatchLimit: 50,
+                interval: .minutes(15)
+            )
+
+            try await db.transaction { lockTransaction in
+                let lockPostgres = lockTransaction as! any PostgresDatabase
+                try await lockPostgres.sql().raw("""
+                    SELECT pg_advisory_xact_lock(\(bind: CandidateSchedulerJob.advisoryLockKey))
+                """).run()
+
+                try await CandidateSchedulerJob.runAutomatedCycle(
+                    application: app,
+                    database: db,
+                    config: config
+                )
+            }
+
+            #expect(try await NotificationCandidate.query(on: db).count() == 0)
+            #expect(try await NotificationDeliveryAttempt.query(on: db).count() == 0)
+        }
+    }
 }
