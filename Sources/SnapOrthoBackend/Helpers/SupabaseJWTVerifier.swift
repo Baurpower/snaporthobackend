@@ -32,11 +32,28 @@ final class SupabaseJWKSVerifier: SupabaseAuthVerifying, @unchecked Sendable {
     private let keys: JWTKeyCollection
     private let expectedIssuer: String
     private let logger: Logger
+    /// Number of public keys published by Supabase. Zero means the project still
+    /// signs access tokens with the legacy shared secret (HS256), which a JWKS
+    /// verifier can never check.
+    let keyCount: Int
 
-    init(keys: JWTKeyCollection, expectedIssuer: String, logger: Logger) {
+    init(keys: JWTKeyCollection, expectedIssuer: String, logger: Logger, keyCount: Int) {
         self.keys = keys
         self.expectedIssuer = expectedIssuer
         self.logger = logger
+        self.keyCount = keyCount
+    }
+
+    /// Counts the entries in a JWKS document's `keys` array.
+    static func publishedKeyCount(in jwksJSON: String) -> Int {
+        struct JWKS: Decodable {
+            struct Key: Decodable {}
+            let keys: [Key]?
+        }
+        guard let data = jwksJSON.data(using: .utf8),
+              let document = try? JSONDecoder().decode(JWKS.self, from: data)
+        else { return 0 }
+        return document.keys?.count ?? 0
     }
 
     static func load(supabaseURL: URL, logger: Logger, client: any Client) async throws -> SupabaseJWKSVerifier {
@@ -137,7 +154,8 @@ final class SupabaseJWKSVerifier: SupabaseAuthVerifying, @unchecked Sendable {
         return SupabaseJWKSVerifier(
             keys: keys,
             expectedIssuer: issuer,
-            logger: Logger(label: "supabase.jwt")
+            logger: Logger(label: "supabase.jwt"),
+            keyCount: publishedKeyCount(in: jwksJSON)
         )
     }
 
@@ -161,11 +179,16 @@ final class SupabaseJWKSVerifier: SupabaseAuthVerifying, @unchecked Sendable {
 
 final class SupabaseAPIJWTVerifier: SupabaseAuthVerifying, @unchecked Sendable {
     private let supabaseURL: URL
+    private let apiKey: String
     private let client: any Client
     private let logger: Logger
 
-    init(supabaseURL: URL, client: any Client, logger: Logger) {
+    /// - Parameter apiKey: a Supabase project API key. The Auth gateway rejects
+    ///   requests without an `apikey` header ("No API key found in request")
+    ///   even when the bearer token is valid.
+    init(supabaseURL: URL, apiKey: String, client: any Client, logger: Logger) {
         self.supabaseURL = supabaseURL
+        self.apiKey = apiKey
         self.client = client
         self.logger = logger
     }
@@ -175,6 +198,7 @@ final class SupabaseAPIJWTVerifier: SupabaseAuthVerifying, @unchecked Sendable {
 
         let response = try await client.get(URI(string: userURL.absoluteString)) { req in
             req.headers.bearerAuthorization = .init(token: jwt)
+            req.headers.replaceOrAdd(name: "apikey", value: apiKey)
         }
 
         guard response.status == .ok else {
@@ -192,6 +216,40 @@ final class SupabaseAPIJWTVerifier: SupabaseAuthVerifying, @unchecked Sendable {
         }
 
         return uuid
+    }
+}
+
+// MARK: - Composite verifier (production)
+
+/// Verifies locally against the published JWKS when it can, otherwise asks
+/// Supabase Auth.
+///
+/// Supabase publishes an empty JWKS while a project still signs access tokens
+/// with the legacy shared secret. A JWKS-only verifier then rejects every real
+/// user token, which is what left every iOS push token registered after
+/// 2026-07-21 unlinked from its user (`/device/register` returned 401 for
+/// signed-in uploads). After a migration to asymmetric signing keys the local
+/// path takes over with no code change.
+final class SupabaseCompositeJWTVerifier: SupabaseAuthVerifying, @unchecked Sendable {
+    private let local: (any SupabaseAuthVerifying)?
+    private let remote: any SupabaseAuthVerifying
+    private let logger: Logger
+
+    init(local: (any SupabaseAuthVerifying)?, remote: any SupabaseAuthVerifying, logger: Logger) {
+        self.local = local
+        self.remote = remote
+        self.logger = logger
+    }
+
+    func verifiedUserId(from jwt: String) async throws -> UUID {
+        if let local {
+            do {
+                return try await local.verifiedUserId(from: jwt)
+            } catch {
+                logger.debug("JWKS verification failed, falling back to Supabase Auth: \(error)")
+            }
+        }
+        return try await remote.verifiedUserId(from: jwt)
     }
 }
 
@@ -222,23 +280,37 @@ extension Application {
             throw Abort(.internalServerError)
         }
 
-        do {
-            let verifier = try SupabaseJWKSVerifier.loadBlocking(supabaseURL: supabaseURL, logger: logger)
-            storage[SupabaseJWTVerifierStorageKey.self] = verifier
-        } catch {
-            if environment == .production {
-                logger.critical("❌ Failed to load Supabase JWKS in production: \(error)")
-                throw error
-            }
-
-            logger.warning("⚠️ JWKS load failed — falling back to Supabase API JWT verification: \(error)")
-
-            storage[SupabaseJWTVerifierStorageKey.self] = SupabaseAPIJWTVerifier(
-                supabaseURL: supabaseURL,
-                client: client,
-                logger: logger
-            )
+        guard let apiKey = Environment.get("SUPABASE_SERVICE_ROLE_KEY"), !apiKey.isEmpty else {
+            logger.critical("❌ SUPABASE_SERVICE_ROLE_KEY is required for Supabase Auth token verification")
+            throw Abort(.internalServerError)
         }
+
+        let remote = SupabaseAPIJWTVerifier(
+            supabaseURL: supabaseURL,
+            apiKey: apiKey,
+            client: client,
+            logger: logger
+        )
+
+        var local: SupabaseJWKSVerifier?
+        do {
+            local = try SupabaseJWKSVerifier.loadBlocking(supabaseURL: supabaseURL, logger: logger)
+        } catch {
+            logger.warning("⚠️ JWKS load failed — verifying user tokens via Supabase Auth only: \(error)")
+        }
+
+        if let jwks = local, jwks.keyCount == 0 {
+            logger.info("ℹ️ Supabase JWKS has no public keys (legacy HS256 signing) — verifying user tokens via Supabase Auth")
+            local = nil
+        } else if let jwks = local {
+            logger.info("✅ Supabase JWKS has \(jwks.keyCount) key(s) — verifying locally with Supabase Auth fallback")
+        }
+
+        storage[SupabaseJWTVerifierStorageKey.self] = SupabaseCompositeJWTVerifier(
+            local: local,
+            remote: remote,
+            logger: logger
+        )
     }
 }
 

@@ -168,6 +168,7 @@ func routes(_ app: Application) throws {
         let userInfoURL = URI(string: "\(supabaseURL)/auth/v1/user")
         var headers = HTTPHeaders()
         headers.add(name: .authorization, value: "Bearer \(bearer)")
+        headers.add(name: "apikey", value: serviceKey)
 
         let resp = try await req.client.get(userInfoURL, headers: headers)
 
